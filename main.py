@@ -1,1 +1,30 @@
-print('hello word 2')
+import os
+import nibabel as nib
+import bids_structure
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR     = os.path.join(PROJECT_ROOT, "data")
+BIDS_DIR     = os.path.join(DATA_DIR, "bids")
+
+SUBJ = "sub-01"
+SES  = "ses-01"
+
+ANAT_DIR = os.path.join(BIDS_DIR, SUBJ, SES, "anat")
+MRS_DIR  = os.path.join(BIDS_DIR, SUBJ, SES, "mrs")
+T1W_PATH = os.path.join(ANAT_DIR, f"{SUBJ}_{SES}_acq-UNIDEN_T1w.nii")
+
+bids_structure.run(
+    data_dir    = DATA_DIR,
+    output_dir  = BIDS_DIR,
+    subject_t1w = "01",
+    session     = 1,
+    overwrite   = False,
+)
+
+mrs_files = sorted(
+    f for f in os.listdir(MRS_DIR) if f.endswith(".nii.gz")
+)
+
+t1w_img     = nib.load(T1W_PATH)
+mrs_example = nib.load(os.path.join(MRS_DIR, mrs_files[0]))
+
