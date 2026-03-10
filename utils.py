@@ -167,6 +167,157 @@ def plot_coverage_grid(
         plt.show()
 
 
+def rank_metabolites_by_snr(
+    mrs_dir: str,
+    subj: str = "sub-01",
+    ses: str = "ses-01",
+    top_n: int | None = None,
+) -> list[dict]:
+    """
+    Rank all ``acq-OrigRes`` concentration maps by their effective SNR,
+    using the scanner-provided per-voxel SNR map (desc-VoxelSNR_mrsi).
+    For each metabolite map the function computes inside the voxels where
+    that map has positive signal
+    """
+    # locate the VoxelSNR map
+    snr_candidates = [
+        f for f in os.listdir(mrs_dir)
+        if "VoxelSNR" in f and f.endswith(".nii.gz")
+    ]
+    if not snr_candidates:
+        raise FileNotFoundError(
+            f"No VoxelSNR map found in {mrs_dir}. "
+            "Expected a file matching 'VoxelSNRmrsi.nii.gz'."
+        )
+    snr_map = nib.load(os.path.join(mrs_dir, snr_candidates[0])).get_fdata()
+
+    # collect all individual OrigRes concentration maps
+    conc_files = sorted(
+        f for f in os.listdir(mrs_dir)
+        if f.endswith(".nii.gz")
+        and "acq-OrigRes" in f
+        and "AllMetabSum" not in f
+    )
+
+    records = []
+    for fname in conc_files:
+        data = nib.load(os.path.join(mrs_dir, fname)).get_fdata()
+        # support mask: voxels with positive concentration AND positive SNR
+        mask = (data > 0) & (snr_map > 0)
+        if not mask.any():
+            continue
+        pos_data = data[mask]
+        snr_vals = snr_map[mask]
+        records.append({
+            "filename":   fname,
+            "metabolite": metabolite_name(fname),
+            "mean_snr":   float(np.mean(snr_vals)),
+            "median_snr": float(np.median(snr_vals)),
+            "n_voxels":   int(mask.sum()),
+            "cv":         float(np.std(pos_data) / (np.mean(pos_data) + 1e-12)),
+            "subj":       subj,
+            "ses":        ses,
+        })
+
+    # sort descending by mean_snr
+    records.sort(key=lambda r: r["mean_snr"], reverse=True)
+    for i, r in enumerate(records):
+        r["rank"] = i + 1
+
+    return records[:top_n] if top_n is not None else records
+
+
+def plot_snr_ranking(
+    records: list[dict],
+    top_n: int = 20,
+    highlight_best: int = 3,
+) -> None:
+    """
+    Horizontal bar chart of metabolite maps ranked by mean VoxelSNR.
+
+    Parameters
+    ----------
+    records : list of dict
+        Output of :func:`rank_metabolites_by_snr` (already sorted).
+    top_n : int
+        How many bars to display (default 20).
+    highlight_best : int
+        The top-N bars are drawn in a distinct colour (default 3).
+    """
+    shown   = records[:top_n]
+    labels  = [r["metabolite"] for r in shown]
+    means   = [r["mean_snr"]   for r in shown]
+    medians = [r["median_snr"] for r in shown]
+    n_vox   = [r["n_voxels"]   for r in shown]
+
+    n = len(shown)
+    y = np.arange(n)
+
+    colours = [
+        "#f4a261" if i < highlight_best else "#457b9d"
+        for i in range(n)
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, max(5, n * 0.45)),
+                             facecolor="#111111")
+
+    # --- left panel: SNR bars ---
+    ax = axes[0]
+    ax.set_facecolor("#111111")
+    bars = ax.barh(y, means, color=colours, edgecolor="none", height=0.6)
+    ax.errorbar(medians, y, fmt="D", color="white", markersize=4,
+                linewidth=0, label="median SNR", zorder=5)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, color="white", fontsize=9)
+    ax.set_xlabel("Mean VoxelSNR (over metabolite support)", color="white", fontsize=10)
+    ax.set_title("Metabolite ranking by SNR", color="white", fontsize=11, pad=8)
+    ax.tick_params(colors="white")
+    ax.spines[:].set_color("#444444")
+    ax.invert_yaxis()
+    ax.legend(facecolor="#333333", labelcolor="white", fontsize=8)
+
+    # annotate bars with mean value
+    for bar, val in zip(bars, means):
+        ax.text(
+            bar.get_width() + 0.02, bar.get_y() + bar.get_height() / 2,
+            f"{val:.2f}", va="center", ha="left", color="white", fontsize=8,
+        )
+
+    # --- right panel: number of valid voxels ---
+    ax2 = axes[1]
+    ax2.set_facecolor("#111111")
+    ax2.barh(y, n_vox, color=colours, edgecolor="none", height=0.6)
+    ax2.set_yticks(y)
+    ax2.set_yticklabels(labels, color="white", fontsize=9)
+    ax2.set_xlabel("Number of valid voxels (coverage)", color="white", fontsize=10)
+    ax2.set_title("Spatial coverage per metabolite", color="white", fontsize=11, pad=8)
+    ax2.tick_params(colors="white")
+    ax2.spines[:].set_color("#444444")
+    ax2.invert_yaxis()
+
+    subj = shown[0]["subj"] if shown else ""
+    ses  = shown[0]["ses"]  if shown else ""
+    fig.suptitle(
+        f"{subj} {ses} – Metabolite SNR ranking  "
+        f"({'all' if top_n >= len(records) else f'top {top_n}'} maps shown)",
+        color="white", fontsize=12, y=1.01,
+    )
+    plt.tight_layout()
+    plt.show()
+
+    # print the top-3 best
+    print(f"\nTop-{highlight_best} metabolites by mean VoxelSNR:")
+    for r in records[:highlight_best]:
+        print(
+            f"  #{r['rank']:2d}  {r['metabolite']:<25s}"
+            f"  mean_SNR={r['mean_snr']:.2f}"
+            f"  median_SNR={r['median_snr']:.2f}"
+            f"  n_voxels={r['n_voxels']:,}"
+            f"  CV={r['cv']:.3f}"
+        )
+
+
 def save_metabolite_sum(
     bids_dir: str,
     ses: str = "ses-01",
@@ -227,6 +378,163 @@ def save_metabolite_sum(
         saved[subj] = out_path
 
     return saved
+
+
+def downsample_t1w_to_mrs(
+    bids_dir: str,
+    ses: str = "ses-01",
+    t1w_acq: str = "UNIDEN",
+    overwrite: bool = False,
+) -> dict:
+    """
+    For every subject in ``bids_dir`` that has an ``anat/`` folder containing
+    a T1w UNI-DEN image, resample the T1w to the spatial grid of the first
+    ``acq-OrigRes`` MRSI map and save the result as
+         anat/<subj>_<ses>_acq-MRSIres_T1w.nii.gz
+    """
+    saved = {}
+
+    for subj in sorted(os.listdir(bids_dir)):
+        if not subj.startswith("sub-"):
+            continue
+
+        anat_dir = os.path.join(bids_dir, subj, ses, "anat")
+        mrs_dir  = os.path.join(bids_dir, subj, ses, "mrs")
+
+        if not os.path.isdir(anat_dir):
+            print(f"  [t1w-ds] {subj}: no anat/ folder, skipping.")
+            continue
+        if not os.path.isdir(mrs_dir):
+            print(f"  [t1w-ds] {subj}: no mrs/ folder, skipping.")
+            continue
+
+        out_name = f"{subj}_{ses}_acq-MRSIres_T1w.nii.gz"
+        out_path = os.path.join(anat_dir, out_name)
+
+        if os.path.exists(out_path) and not overwrite:
+            print(f"  [t1w-ds] {subj}: already exists  {out_name}")
+            saved[subj] = out_path
+            continue
+
+        # locate the T1w source
+        t1w_name = f"{subj}_{ses}_acq-{t1w_acq}_T1w.nii"
+        t1w_path = os.path.join(anat_dir, t1w_name)
+        if not os.path.exists(t1w_path):
+            # also try .nii.gz
+            t1w_path_gz = t1w_path + ".gz"
+            if os.path.exists(t1w_path_gz):
+                t1w_path = t1w_path_gz
+            else:
+                print(f"  [t1w-ds] {subj}: T1w not found ({t1w_name}), skipping.")
+                continue
+
+        # pick the first OrigRes MRSI map as the target grid
+        mrs_maps = sorted(
+            f for f in os.listdir(mrs_dir)
+            if f.endswith(".nii.gz") and "acq-OrigRes" in f and "AllMetabSum" not in f
+        )
+        if not mrs_maps:
+            print(f"  [t1w-ds] {subj}: no OrigRes MRSI maps found, skipping.")
+            continue
+
+        mrs_ref_img = nib.load(os.path.join(mrs_dir, mrs_maps[0]))
+        t1w_img     = nib.load(t1w_path)
+
+        # resample T1w → MRSI grid (order=1: linear interpolation, good for anatomical)
+        t1w_ds = resample_from_to(t1w_img, mrs_ref_img, order=1)
+        t1w_ds = nib.Nifti1Image(
+            np.array(t1w_ds.dataobj, dtype=np.float32),
+            t1w_ds.affine,
+            t1w_ds.header,
+        )
+        t1w_ds.set_data_dtype(np.float32)
+        nib.save(t1w_ds, out_path)
+        print(
+            f"  [t1w-ds] {subj}: saved {out_name}  "
+            f"(T1w {t1w_img.shape} → MRS grid {mrs_ref_img.shape})"
+        )
+        saved[subj] = out_path
+
+    return saved
+
+
+def plot_t1w_mrs_comparison(
+    t1w_ds_img: nib.Nifti1Image,
+    mrs_img: nib.Nifti1Image,
+    subj: str = "sub-01",
+    mrs_label: str = "MRSI",
+    t1w_cmap: str = "gray",
+    mrs_cmap: str = "hot",
+) -> None:
+    """
+    Side-by-side ortho comparison of the downsampled T1w and one MRSI map,
+    both shown at the same voxel grid (native MRS space).
+
+    Three rows:
+      • Downsampled T1w  (axial / coronal / sagittal centre slices)
+      • MRSI map (same slices)
+      • Overlay (T1w in grey, MRSI in colour)
+    """
+    t1_data = t1w_ds_img.get_fdata()
+    mrs_data = mrs_img.get_fdata()
+
+    # normalise
+    t1_norm  = np.clip(t1_data  / (np.nanpercentile(t1_data[t1_data  > 0], 99) or 1), 0, 1) \
+               if np.any(t1_data > 0) else t1_data
+    mrs_norm = np.clip(mrs_data / (np.nanpercentile(mrs_data[mrs_data > 0], 99) or 1), 0, 1) \
+               if np.any(mrs_data > 0) else mrs_data
+
+    mid = [s // 2 for s in t1_data.shape]
+
+    def _slices(vol):
+        return [
+            vol[:, :, mid[2]],   # axial
+            vol[:, mid[1], :],   # coronal
+            vol[mid[0], :, :],   # sagittal
+        ]
+
+    t1_slices  = _slices(t1_norm)
+    mrs_slices = _slices(mrs_norm)
+    view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
+
+    fig, axes = plt.subplots(3, 3, figsize=(13, 11), facecolor="black")
+    row_labels = [f"T1w @ MRS res", mrs_label, "Overlay"]
+
+    cmap_t1  = plt.get_cmap(t1w_cmap)
+    cmap_mrs = plt.get_cmap(mrs_cmap)
+
+    for col, (t1s, ms, vl) in enumerate(zip(t1_slices, mrs_slices, view_labels)):
+        # Row 0 – T1w
+        axes[0, col].imshow(t1s.T, origin="lower", cmap=t1w_cmap,
+                            vmin=0, vmax=1, interpolation="nearest")
+        axes[0, col].set_title(vl, color="white", fontsize=10)
+
+        # Row 1 – MRSI
+        masked_mrs = np.ma.masked_where(ms < 1e-6, ms)
+        axes[1, col].imshow(t1s.T, origin="lower", cmap=t1w_cmap,
+                            vmin=0, vmax=1, interpolation="nearest")
+        axes[1, col].imshow(masked_mrs.T, origin="lower", cmap=mrs_cmap,
+                            vmin=0, vmax=1, alpha=0.85, interpolation="nearest")
+
+        # Row 2 – Overlay
+        axes[2, col].imshow(t1s.T, origin="lower", cmap=t1w_cmap,
+                            vmin=0, vmax=1, interpolation="nearest")
+        axes[2, col].imshow(masked_mrs.T, origin="lower", cmap=mrs_cmap,
+                            vmin=0, vmax=1, alpha=0.6, interpolation="nearest")
+
+    for row, rl in enumerate(row_labels):
+        for col in range(3):
+            axes[row, col].set_facecolor("black")
+            axes[row, col].axis("off")
+        axes[row, 0].set_ylabel(rl, color="white", fontsize=10, rotation=90,
+                                labelpad=6)
+
+    fig.suptitle(
+        f"{subj} – Downsampled T1w vs {mrs_label} (native MRS space, centre slices)",
+        color="white", fontsize=12, y=1.01,
+    )
+    plt.tight_layout()
+    plt.show()
 
 
 def plot_mrsi_mosaic(

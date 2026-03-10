@@ -36,3 +36,9 @@ SUM_PATH  = os.path.join(MRS_DIR, SUM_NAME)
 utils.save_metabolite_sum(BIDS_DIR, ses=SES, overwrite=True)
 sum_img   = nib.load(SUM_PATH) if os.path.exists(SUM_PATH) else None
 
+# Downsampled T1w resampled to the MRSI voxel grid and saved into anat/
+utils.downsample_t1w_to_mrs(BIDS_DIR, ses=SES, overwrite=False)
+T1W_DS_NAME = f"{SUBJ}_{SES}_acq-MRSIres_T1w.nii.gz"
+T1W_DS_PATH = os.path.join(ANAT_DIR, T1W_DS_NAME)
+t1w_ds_img  = nib.load(T1W_DS_PATH) if os.path.exists(T1W_DS_PATH) else None
+
