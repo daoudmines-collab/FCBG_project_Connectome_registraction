@@ -139,7 +139,7 @@ def _convert_t1w(
     subject: str,
     session: int,
     overwrite: bool,
-) -> None:
+):
     ses_label = f"ses-{session:02d}"
     anat_dir  = bids_root / f"sub-{subject}" / ses_label / "anat"
 
@@ -169,6 +169,7 @@ def _convert_t1w(
 
         _transfer(nii, dst_nii, overwrite)
         _transfer(json_path, dst_json, overwrite)
+    
 
 
 def _metabolite_label(filename: str) -> str:

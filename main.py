@@ -13,6 +13,7 @@ ANAT_DIR = os.path.join(BIDS_DIR, SUBJ, SES, "anat")
 MRS_DIR  = os.path.join(BIDS_DIR, SUBJ, SES, "mrs")
 T1W_PATH = os.path.join(ANAT_DIR, f"{SUBJ}_{SES}_acq-UNIDEN_T1w.nii")
 
+
 bids_structure.run(
     data_dir    = DATA_DIR,
     output_dir  = BIDS_DIR,

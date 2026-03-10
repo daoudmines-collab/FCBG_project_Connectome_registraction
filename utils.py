@@ -1,38 +1,3 @@
-"""
-utils.py
-========
-Visualization helpers for the FCBG Connectome Registration project.
-
-All functions here operate on pre-loaded nibabel images or BIDS paths
-that are set up by main.py.
-
-Public API
-----------
-img_info(img, label)
-    Print shape, voxel size and dtype of a NIfTI image.
-
-metabolite_name(filename)
-    Extract the BIDS ``desc`` label from an MRSI filename.
-
-get_nonzero_com(img)
-    Centre-of-mass (world coords) of nonzero voxels.
-
-estimate_coverage(mrs_resampled_img, t1_img)
-    Fraction of T1 brain voxels covered by the MRSI map.
-
-plot_single_overlay(mrs_filename, t1w_path, mrs_dir, subj, cmap, threshold, vmax)
-    Overlay one metabolite map on the T1w and show the coverage fraction.
-
-plot_support_mask(mrs_filename, t1w_path, mrs_dir, subj)
-    Binary support-mask overlay (for pure spatial coverage inspection).
-
-plot_coverage_grid(coverage_maps, mrs_dir, t1w_path, subj)
-    Multi-row figure: one row per metabolite, three orthogonal views each.
-
-build_coverage_widget(mrs_dir, t1w_path, subj)
-    Build and return an ipywidgets UI for interactive multi-metabolite overlay.
-"""
-
 import os
 import re
 
@@ -41,241 +6,470 @@ import numpy as np
 import matplotlib.pyplot as plt
 import ipywidgets as widgets
 from IPython.display import display, clear_output
-from nibabel.orientations import aff2axcodes
 from nibabel.processing import resample_from_to
 from nilearn import plotting
 
-_MP2RAGE_SERIES_MAP: dict[int, dict] = {
-    3:  {"suffix": "T1map",   "acq": None,          "inv": None},
-    5:  {"suffix": "UNIT1",   "acq": "UNI",         "inv": None},
-    6:  {"suffix": "T1w",     "acq": "UNIDEN",      "inv": None},
-    7:  {"suffix": "MP2RAGE", "acq": None,          "inv": "1"},
-    8:  {"suffix": "MP2RAGE", "acq": None,          "inv": "2"},
-    9:  {"suffix": "T1w",     "acq": "MPRtra",      "inv": None},
-    10: {"suffix": "T1w",     "acq": "MPRcor",      "inv": None},
-    11: {"suffix": "T1w",     "acq": "UNIDEND",     "inv": None},
-    12: {"suffix": "T1w",     "acq": "MPRcorND",    "inv": None},
-    13: {"suffix": "T1w",     "acq": "MPRtraND",    "inv": None},
-}
 
-_ENTITY_ORDER = ["sub", "ses", "task", "acq", "ce", "rec", "run", "echo", "inv", "part"]
+def img_info(img: nib.Nifti1Image, label: str) -> None:
+    """Print shape, voxel size and dtype of a NIfTI image."""
+    vox = np.sqrt(np.sum(img.affine[:3, :3] ** 2, axis=0))
+    print(f"{label}")
+    print(f"  shape      : {img.shape}")
+    print(f"  voxel size : {vox.round(3)} mm")
+    print(f"  dtype      : {img.get_data_dtype()}")
+    print()
 
 
-def _build_bids_filename(entities: dict, suffix: str, ext: str) -> str:
-    """Assemble a BIDS-compliant filename from an entity dict, suffix, and extension."""
-    parts = []
-    for key in _ENTITY_ORDER:
-        if key in entities:
-            parts.append(f"{key}-{entities[key]}")
-    # Append any extra keys not in the canonical order
-    for key, val in entities.items():
-        if key not in _ENTITY_ORDER:
-            parts.append(f"{key}-{val}")
-    return "_".join(parts) + f"_{suffix}{ext}"
+
+def metabolite_name(filename: str) -> str:
+    """Extract the BIDS ``desc`` label from an MRSI filename."""
+    m = re.search(r"desc-([^_]+)_mrsi", filename)
+    return m.group(1) if m else filename
 
 
-def _parse_metabolite_label(filename: str) -> str:
+def get_nonzero_com(img: nib.Nifti1Image) -> tuple:
+    """Centre-of-mass (world coords) of nonzero finite voxels."""
+    data = img.get_fdata()
+    mask = np.isfinite(data) & (data > 0)
+    if not mask.any():
+        return (0.0, 0.0, 0.0)
+    ijk = np.argwhere(mask).mean(axis=0)
+    xyz = nib.affines.apply_affine(img.affine, ijk)
+    return tuple(float(v) for v in xyz[:3])
+
+
+def estimate_coverage(
+    mrs_resampled_img: nib.Nifti1Image,
+    t1_img: nib.Nifti1Image,
+) -> float:
+    """Return fraction of T1 brain voxels (T1>0) covered by the MRSI map."""
+    mrs = mrs_resampled_img.get_fdata()
+    t1  = t1_img.get_fdata()
+    brain   = np.isfinite(t1) & (t1 > 0)
+    covered = np.isfinite(mrs) & (mrs > 0)
+    frac = float(np.mean(covered[brain])) if brain.any() else 0.0
+    print(f"  Brain coverage: {frac * 100:.1f}%")
+    return frac
+
+def plot_single_overlay(
+    mrs_filename: str,
+    t1w_path: str,
+    mrs_dir: str,
+    subj: str = "sub-01",
+    cmap: str = "hot",
+    threshold=None,
+    vmax=None,
+    verbose: bool = False,
+) -> float:
     """
-    Extract a BIDS-safe metabolite label from a filename such as
-    ``OrigRes_NAA+NAAG_conc_reo.nii.gz``  →  ``NAAaddNAAG``
-    ``EIB_conc_reo.nii.gz``               →  ``EIB``
-    ``OrigRes_Cr+PCr_conc_reo.nii.gz``    →  ``CraddPCr``
-    ``OrigRes_-CrCH2_conc_reo.nii.gz``    →  ``minusCrCH2``
+    Canonicalize, resample, and plot one MRSI map on the T1w.
+    Returns the brain-coverage fraction.
     """
-    stem = filename.replace(".nii.gz", "").replace(".nii", "")
+    mrs_path = os.path.join(mrs_dir, mrs_filename)
+    label    = metabolite_name(mrs_filename)
 
-    # Strip known prefix / suffix tokens
-    stem = re.sub(r"^OrigRes_", "", stem)
-    stem = re.sub(r"_conc_reo$", "", stem)
-    stem = re.sub(r"_conc$", "", stem)
+    t1_img  = nib.as_closest_canonical(nib.load(t1w_path))
+    mrs_img = nib.as_closest_canonical(nib.load(mrs_path))
 
-    # Make BIDS-safe: replace '+' with 'add', leading '-' with 'minus'
-    label = stem
-    label = re.sub(r"^\-", "minus", label)
-    label = label.replace("+", "add")
-    # Remove any remaining non-alphanumeric characters
-    label = re.sub(r"[^a-zA-Z0-9]", "", label)
+    if verbose:
+        print(f"T1  orient: {nib.orientations.aff2axcodes(t1_img.affine)}")
+        print(f"MRS orient: {nib.orientations.aff2axcodes(mrs_img.affine)}")
 
-    return label
+    mrs_res  = resample_from_to(mrs_img, t1_img, order=1)
+    mrs_data = mrs_res.get_fdata()
+    valid    = np.isfinite(mrs_data) & (mrs_data > 0)
 
+    if vmax is None and valid.any():
+        vmax = float(np.nanpercentile(mrs_data[valid], 99))
+    if threshold is None and valid.any():
+        threshold = float(np.nanpercentile(mrs_data[valid], 20))
 
-def _parse_acq_label(filename: str) -> str | None:
-    """
-    Return ``OrigRes`` if the filename starts with ``OrigRes_``, else ``None``
-    (used for the BIDS ``acq`` entity on MRS maps).
-    """
-    if filename.startswith("OrigRes_"):
-        return "OrigRes"
-    return None
-
-
-def convert_to_bids(
-    data_dir: str | Path,
-    output_dir: str | Path,
-    subject_t1w: str = "01",
-    session: str | None = None,
-    overwrite: bool = False,
-) -> None:
-    """
-    Convert the raw FCBG dataset into a BIDS-compliant directory tree.
-    Output structure:
-
-        <output_dir>/
-        ├── dataset_description.json
-        ├── participants.tsv
-        ├── sub-01/
-            ├── anat/
-            │   ├── sub-01_T1map.nii
-            │   ├── sub-01_T1map.json
-            │   ├── sub-01_acq-UNI_UNIT1.nii
-            │   ├── sub-01_T1w.nii           ← UNI-DEN (acq-UNIDEN)
-            │   ├── sub-01_inv-1_MP2RAGE.nii
-            │   ├── sub-01_inv-2_MP2RAGE.nii
-            │   └── ...
-            └── mrs/
-                ├── sub-01_acq-OrigRes_metabolite-NAA_mrsmap.nii.gz
-                └── ...
-    """
-    data_dir = Path(data_dir)
-    output_dir = Path(output_dir)
-    t1w_dir = data_dir / "T1w_NIFTI"
-    mrs_root = data_dir / "met_conc_NIFTI"
-
-    if not t1w_dir.exists():
-        raise FileNotFoundError(f"T1w directory not found: {t1w_dir}")
-    if not mrs_root.exists():
-        raise FileNotFoundError(f"MRS directory not found: {mrs_root}")
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    _write_dataset_description(output_dir)
-    _convert_t1w(t1w_dir, output_dir, subject_t1w, session, overwrite)
-
-    participants: list[str] = [f"sub-{subject_t1w}"]
-    for sub_dir in sorted(mrs_root.iterdir()):
-        if not sub_dir.is_dir():
-            continue
-        # e.g. "sub01" → "01"
-        label = re.sub(r"^sub0*", "", sub_dir.name) or sub_dir.name
-        label = label.zfill(2)
-        _convert_mrs(sub_dir, output_dir, label, session, overwrite)
-        bids_label = f"sub-{label}"
-        if bids_label not in participants:
-            participants.append(bids_label)
-
-    _write_participants_tsv(output_dir, participants)
-    print(f"[convert_to_bids] Done. BIDS dataset written to: {output_dir}")
-
-
-
-def _transfer(src: Path, dst: Path, overwrite: bool) -> None:
-    """Copy ``src`` → ``dst``, respecting the overwrite flag."""
-    if dst.exists() and not overwrite:
-        return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-
-
-def _convert_t1w(
-    t1w_dir: Path,
-    bids_root: Path,
-    subject: str,
-    session: str | None,
-    overwrite: bool,
-) -> None:
-    """Convert T1w / MP2RAGE NIfTI files to BIDS ``anat/`` layout."""
-    base_entities = {"sub": subject}
-    if session:
-        base_entities["ses"] = session
-
-    ses_part = f"ses-{session}/" if session else ""
-    anat_dir = bids_root / f"sub-{subject}" / (f"ses-{session}/" if session else "") / "anat"
-    anat_dir = (
-        bids_root / f"sub-{subject}" / f"ses-{session}" / "anat"
-        if session
-        else bids_root / f"sub-{subject}" / "anat"
+    plotting.plot_stat_map(
+        stat_map_img=mrs_res,
+        bg_img=t1_img,
+        title=f"{subj} - {label}",
+        display_mode="ortho",
+        cut_coords=get_nonzero_com(mrs_res),
+        cmap=cmap,
+        colorbar=True,
+        threshold=threshold,
+        vmax=vmax,
+        resampling_interpolation="continuous",
     )
-
-    # Collect all NIfTI files together with their JSON sidecar
-    nii_files = sorted(t1w_dir.glob("_t1_mp2rage*.nii"))
-    for nii in nii_files:
-        json_path = nii.with_suffix(".json")
-        if not json_path.exists():
-            print(f"  [T1w] No JSON sidecar for {nii.name}, skipping.")
-            continue
-
-        with open(json_path) as fh:
-            meta = json.load(fh)
-
-        series_num = meta.get("SeriesNumber")
-        if series_num not in _MP2RAGE_SERIES_MAP:
-            print(f"  [T1w] Series {series_num} ({nii.name}) not in mapping, skipping.")
-            continue
-
-        mapping = _MP2RAGE_SERIES_MAP[series_num]
-        entities = {**base_entities, **mapping["entities"]}
-        suffix = mapping["suffix"]
-
-        bids_stem = _build_bids_filename(entities, suffix, "")
-        dst_nii = anat_dir / (bids_stem + nii.suffix)  # preserves .nii or .nii.gz
-        dst_json = anat_dir / (bids_stem + ".json")
-
-        _transfer(nii, dst_nii, overwrite)
-        _transfer(json_path, dst_json, overwrite)
-        print(f"  [T1w] {nii.name}  →  anat/{dst_nii.name}")
+    plt.show()
+    return estimate_coverage(mrs_res, t1_img)
 
 
-def _convert_mrs(
-    sub_dir: Path,
-    bids_root: Path,
-    subject: str,
-    session: str | None,
-    overwrite: bool,
-) -> None:
-    """Convert MRS metabolite-concentration maps to BIDS ``mrs/`` layout."""
-    mrs_out = (
-        bids_root / f"sub-{subject}" / f"ses-{session}" / "mrs"
-        if session
-        else bids_root / f"sub-{subject}" / "mrs"
+def plot_support_mask(
+    mrs_filename: str,
+    t1w_path: str,
+    mrs_dir: str,
+    subj: str = "sub-01",
+) -> float:
+    """Binary MRSI support mask overlaid on T1w. Returns coverage fraction."""
+    mrs_path = os.path.join(mrs_dir, mrs_filename)
+
+    t1_img  = nib.as_closest_canonical(nib.load(t1w_path))
+    mrs_img = nib.as_closest_canonical(nib.load(mrs_path))
+
+    mask_data = (mrs_img.get_fdata() > 0).astype(np.float32)
+    mask_img  = nib.Nifti1Image(mask_data, mrs_img.affine, mrs_img.header)
+    mask_res  = resample_from_to(mask_img, t1_img, order=0)
+
+    plotting.plot_roi(
+        roi_img=mask_res,
+        bg_img=t1_img,
+        title=f"{subj} - MRSI support mask ({metabolite_name(mrs_filename)})",
+        display_mode="ortho",
+        cut_coords=get_nonzero_com(mask_res),
     )
-
-    for nii in sorted(sub_dir.glob("*.nii.gz")):
-        metabolite = _parse_metabolite_label(nii.name)
-        acq = _parse_acq_label(nii.name)
-
-        entities: dict[str, str] = {"sub": subject}
-        if session:
-            entities["ses"] = session
-        if acq:
-            entities["acq"] = acq
-        entities["metabolite"] = metabolite
-
-        bids_name = _build_bids_filename(entities, "mrsmap", ".nii.gz")
-        dst = mrs_out / bids_name
-        _transfer(nii, dst, overwrite)
-        print(f"  [MRS] sub-{subject}: {nii.name}  →  mrs/{bids_name}")
+    plt.show()
+    return estimate_coverage(mask_res, t1_img)
 
 
-def _write_dataset_description(bids_root: Path) -> None:
-    """Write a minimal ``dataset_description.json`` if one does not exist."""
-    dst = bids_root / "dataset_description.json"
-    if dst.exists():
-        return
-    description = {
-        "Name": "FCBG Connectome Registration Dataset",
-        "BIDSVersion": "1.9.0",
-        "DatasetType": "raw",
-        "Authors": ["FCBG"],
-        "License": "CC0",
-    }
-    with open(dst, "w") as fh:
-        json.dump(description, fh, indent=2)
+def plot_coverage_grid(
+    coverage_maps: list,
+    mrs_dir: str,
+    t1w_path: str,
+    subj: str = "sub-01",
+) -> None:
+    """
+    Plot each metabolite map overlaid on the T1w, one figure per metabolite,
+    using nilearn's ortho view (axial + coronal + sagittal in one figure).
+    Avoids passing axes= to nilearn so there are no stray white rectangles.
+    """
+    t1w_img  = nib.load(t1w_path)
+    t1w_data = t1w_img.get_fdata()
+
+    centre_ijk = [s // 2 for s in t1w_data.shape]
+    centre_xyz = nib.affines.apply_affine(t1w_img.affine, centre_ijk)
+    cut_coords = tuple(float(v) for v in centre_xyz[:3])
+
+    for mrs_filename in coverage_maps:
+        mrs_path = os.path.join(mrs_dir, mrs_filename)
+        mrs_img  = nib.load(mrs_path)
+        label    = metabolite_name(mrs_filename)
+        data     = mrs_img.get_fdata()
+        vmax     = float(np.nanpercentile(data[data > 0], 99)) if np.any(data > 0) else 1.0
+
+        plotting.plot_stat_map(
+            stat_map_img=mrs_img,
+            bg_img=t1w_path,
+            title=f"{subj} - {label}",
+            display_mode="ortho",
+            cut_coords=cut_coords,
+            cmap="hot",
+            colorbar=True,
+            vmax=vmax,
+            threshold=1e-6,
+            resampling_interpolation="continuous",
+        )
+        plt.show()
 
 
-def _write_participants_tsv(bids_root: Path, participants: list[str]) -> None:
-    """Write / update ``participants.tsv``."""
-    dst = bids_root / "participants.tsv"
-    with open(dst, "w") as fh:
-        fh.write("participant_id\n")
-        for p in participants:
-            fh.write(f"{p}\n")
+def plot_mrsi_mosaic(
+    mrs_filenames: list,
+    mrs_dir: str,
+    subj: str = "sub-01",
+    cmap: str = "hot",
+    alpha: float = 0.6,
+    cols: int = 3,
+) -> None:
+    """
+    Overlay multiple MRSI concentration maps **in their own native space**,
+    without any T1w background and without registration.
+    """
+    n    = len(mrs_filenames)
+    rows = (n + cols - 1) // cols
+
+    fig, axes = plt.subplots(
+        rows, cols,
+        figsize=(5 * cols, 4 * rows),
+        facecolor="black",
+    )
+    axes = np.array(axes).reshape(-1)   # always 1-D
+
+    for ax, fname in zip(axes, mrs_filenames):
+        img  = nib.load(os.path.join(mrs_dir, fname))
+        data = img.get_fdata()
+
+        # pick the axial slice with the most signal
+        signal_per_slice = (data > 0).sum(axis=(0, 1))
+        z_mid = int(signal_per_slice.argmax())
+        slc   = data[:, :, z_mid]
+
+        # normalise to [0, 1] for display
+        vmax = float(np.nanpercentile(slc[slc > 0], 99)) if np.any(slc > 0) else 1.0
+        slc_norm = np.clip(slc / vmax, 0, 1)
+
+        ax.set_facecolor("black")
+        ax.imshow(
+            slc_norm.T,
+            origin="lower",
+            cmap=cmap,
+            alpha=alpha,
+            vmin=0, vmax=1,
+            interpolation="nearest",
+        )
+        ax.set_title(metabolite_name(fname), color="white", fontsize=9, pad=3)
+        ax.axis("off")
+
+    # hide unused subplot slots
+    for ax in axes[n:]:
+        ax.set_visible(False)
+
+    fig.suptitle(
+        f"{subj} – MRSI concentration maps (native MRS space, axial peak slice)",
+        color="white", fontsize=12, y=1.01,
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_mrsi_combined(
+    mrs_filenames: list,
+    mrs_dir: str,
+    subj: str = "sub-01",
+    cmaps: list | None = None,
+    alpha: float = 0.5,
+) -> None:
+    """
+    Overlay multiple MRSI maps on the same axial, coronal, and sagittal
+    panels in native MRS space  each map gets its own colour so they can be
+    distinguished at a glance.
+    """
+    default_cmaps = [
+        "Reds", "Blues", "Greens", "Oranges", "Purples",
+        "YlOrBr", "PuRd", "BuGn", "RdPu", "GnBu",
+    ]
+    if cmaps is None:
+        cmaps = [default_cmaps[i % len(default_cmaps)] for i in range(len(mrs_filenames))]
+
+    # load all images
+    imgs  = [nib.load(os.path.join(mrs_dir, f)) for f in mrs_filenames]
+    datas = [img.get_fdata() for img in imgs]
+
+    # find shared volume shape (use first image as reference)
+    ref_shape = datas[0].shape
+    mid = [s // 2 for s in ref_shape]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5), facecolor="black")
+    view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
+
+    for ax in axes:
+        ax.set_facecolor("black")
+
+    for data, cmap_name, fname in zip(datas, cmaps, mrs_filenames):
+        # pad/crop to reference shape if needed
+        d = data
+        vmax = float(np.nanpercentile(d[d > 0], 99)) if np.any(d > 0) else 1.0
+        d_norm = np.clip(d / vmax, 0, 1)
+
+        slices = [
+            d_norm[:, :, mid[2]],   # axial
+            d_norm[:, mid[1], :],   # coronal
+            d_norm[mid[0], :, :],   # sagittal
+        ]
+
+        for ax, slc in zip(axes, slices):
+            masked = np.ma.masked_where(slc < 1e-6, slc)
+            ax.imshow(
+                masked.T,
+                origin="lower",
+                cmap=cmap_name,
+                alpha=alpha,
+                vmin=0, vmax=1,
+                interpolation="nearest",
+            )
+
+    for ax, title in zip(axes, view_labels):
+        ax.set_title(title, color="white", fontsize=10)
+        ax.axis("off")
+
+    labels = [metabolite_name(f) for f in mrs_filenames]
+    legend_handles = [
+        plt.Rectangle((0, 0), 1, 1,
+                       fc=plt.get_cmap(c)(0.7), alpha=0.8, label=lbl)
+        for c, lbl in zip(cmaps, labels)
+    ]
+    fig.legend(
+        handles=legend_handles, loc="lower center",
+        ncol=min(len(labels), 6), fontsize=8,
+        facecolor="#222222", labelcolor="white",
+        bbox_to_anchor=(0.5, -0.04),
+    )
+    fig.suptitle(
+        f"{subj} – MRSI coverage overlay (native MRS space, centre slices)",
+        color="white", fontsize=12,
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+def build_coverage_widget(
+    mrs_dir: str,
+    subj: str = "sub-01",
+) -> widgets.Widget:
+    """
+    Interactive widget: select any combination of metabolites via checkboxes
+    and view their concentration maps overlaid in native MRS space.
+
+    Each selected map gets its own colour; maps are shown as transparent
+    layers on 3 orthogonal views (axial / coronal / sagittal) — no T1w
+    background, no registration required.
+    """
+    _PALETTE = [
+        "Reds", "Blues", "Greens", "Oranges", "Purples",
+        "YlOrBr", "PuRd", "BuGn", "RdPu", "GnBu",
+        "copper", "cool", "autumn", "winter", "spring",
+    ]
+
+    all_files = sorted(
+        f for f in os.listdir(mrs_dir)
+        if f.endswith(".nii.gz") and "acq-OrigRes" in f
+    )
+    all_labels = [metabolite_name(f) for f in all_files]
+
+    # load + cache raw arrays (no resampling needed — native space)
+    _cache: dict = {}
+
+    def _get(fname: str) -> np.ndarray:
+        if fname not in _cache:
+            _cache[fname] = nib.load(os.path.join(mrs_dir, fname)).get_fdata()
+        return _cache[fname]
+
+    # reference shape from first file
+    ref_shape = _get(all_files[0]).shape
+    mid = [s // 2 for s in ref_shape]
+
+    defaults = {"NAA", "Cr", "Glu"}
+    n        = len(all_labels)
+    col_size = (n + 1) // 2
+
+    def _make_boxes(labels):
+        return [
+            widgets.Checkbox(
+                value=(lbl in defaults),
+                description=lbl,
+                layout=widgets.Layout(width="190px"),
+            )
+            for lbl in labels
+        ]
+
+    col1_boxes = _make_boxes(all_labels[:col_size])
+    col2_boxes = _make_boxes(all_labels[col_size:])
+    all_boxes  = col1_boxes + col2_boxes
+
+    btn_all  = widgets.Button(
+        description="Select all",
+        button_style="info",
+        layout=widgets.Layout(width="120px"),
+    )
+    btn_none = widgets.Button(
+        description="Deselect all",
+        button_style="warning",
+        layout=widgets.Layout(width="120px"),
+    )
+    btn_plot = widgets.Button(
+        description="▶  Plot",
+        button_style="success",
+        layout=widgets.Layout(width="100px"),
+    )
+    alpha_slider = widgets.FloatSlider(
+        value=0.6, min=0.1, max=1.0, step=0.05,
+        description="Alpha:", readout_format=".2f",
+        layout=widgets.Layout(width="260px"),
+    )
+    out = widgets.Output()
+
+    def _on_all(_):
+        for cb in all_boxes:
+            cb.value = True
+
+    def _on_none(_):
+        for cb in all_boxes:
+            cb.value = False
+
+    def _on_plot(_):
+        chosen_idx = [i for i, cb in enumerate(all_boxes) if cb.value]
+        chosen     = [all_files[i] for i in chosen_idx]
+        labels     = [all_labels[i] for i in chosen_idx]
+        alpha      = alpha_slider.value
+
+        with out:
+            clear_output(wait=True)
+            if not chosen:
+                print("Select at least one metabolite.")
+                return
+
+            fig, axes = plt.subplots(
+                1, 3,
+                figsize=(15, 5),
+                facecolor="black",
+            )
+            view_titles = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
+            for ax, title in zip(axes, view_titles):
+                ax.set_facecolor("black")
+                ax.set_title(title, color="white", fontsize=10)
+                ax.axis("off")
+
+            legend_handles = []
+            for k, (fname, label) in enumerate(zip(chosen, labels)):
+                data  = _get(fname)
+                cmap_name = _PALETTE[k % len(_PALETTE)]
+                vmax  = float(np.nanpercentile(data[data > 0], 99)) if np.any(data > 0) else 1.0
+                d_norm = np.clip(data / vmax, 0, 1)
+
+                slices = [
+                    d_norm[:, :, mid[2]],   # axial
+                    d_norm[:, mid[1], :],   # coronal
+                    d_norm[mid[0], :, :],   # sagittal
+                ]
+                for ax, slc in zip(axes, slices):
+                    masked = np.ma.masked_where(slc < 1e-6, slc)
+                    ax.imshow(
+                        masked.T,
+                        origin="lower",
+                        cmap=cmap_name,
+                        alpha=alpha,
+                        vmin=0, vmax=1,
+                        interpolation="nearest",
+                    )
+                legend_handles.append(
+                    plt.Rectangle(
+                        (0, 0), 1, 1,
+                        fc=plt.get_cmap(cmap_name)(0.7),
+                        alpha=0.85,
+                        label=label,
+                    )
+                )
+
+            fig.legend(
+                handles=legend_handles,
+                loc="lower center",
+                ncol=min(len(labels), 7),
+                fontsize=8,
+                facecolor="#222222",
+                labelcolor="white",
+                bbox_to_anchor=(0.5, -0.06),
+            )
+            fig.suptitle(
+                f"{subj} – MRSI overlay (native MRS space, centre slices)",
+                color="white", fontsize=12,
+            )
+            plt.tight_layout()
+            plt.show()
+            print(f"{len(chosen)} map(s) shown: {labels}")
+
+    btn_all.on_click(_on_all)
+    btn_none.on_click(_on_none)
+    btn_plot.on_click(_on_plot)
+
+    ui = widgets.VBox([
+        widgets.HBox([widgets.VBox(col1_boxes), widgets.VBox(col2_boxes)]),
+        widgets.HBox([btn_all, btn_none, alpha_slider, btn_plot]),
+        out,
+    ])
+
+    _on_plot(None)
+    return ui
