@@ -167,6 +167,68 @@ def plot_coverage_grid(
         plt.show()
 
 
+def save_metabolite_sum(
+    bids_dir: str,
+    ses: str = "ses-01",
+    overwrite: bool = False,
+) -> dict:
+    """
+    For every subject in ``bids_dir``, sum all acq-OrigRes MRSI concentration
+    maps in native MRS space and save the result inside that subject's own
+    mrs/ folder as a NIfTI file.
+    """
+    saved = {}
+
+    for subj in sorted(os.listdir(bids_dir)):
+        if not subj.startswith("sub-"):
+            continue
+
+        mrs_dir  = os.path.join(bids_dir, subj, ses, "mrs")
+        if not os.path.isdir(mrs_dir):
+            print(f"  [sum] {subj}: mrs/ folder not found, skipping.")
+            continue
+
+        out_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSum_mrsi.nii.gz"
+        out_path = os.path.join(mrs_dir, out_name)
+
+        if os.path.exists(out_path) and not overwrite:
+            print(f"  [sum] {subj}: already exists  {out_name}")
+            saved[subj] = out_path
+            continue
+
+        # collect all individual metabolite maps 
+        maps = sorted(
+            f for f in os.listdir(mrs_dir)
+            if f.endswith(".nii.gz")
+            and "acq-OrigRes" in f
+            and "AllMetabSum" not in f
+        )
+        if not maps:
+            print(f"  [sum] {subj}: no OrigRes maps found, skipping.")
+            continue
+
+        # use first file as the affine/header reference
+        ref_img = nib.load(os.path.join(mrs_dir, maps[0]))
+        accum   = np.zeros(ref_img.shape, dtype=np.float32)
+
+        n_used = 0
+        for fname in maps:
+            data = nib.load(os.path.join(mrs_dir, fname)).get_fdata().astype(np.float32)
+            if data.shape != accum.shape:
+                print(f"  [sum] {subj}: shape mismatch in {fname}, skipping that map.")
+                continue
+            accum += np.nan_to_num(data, nan=0.0)
+            n_used += 1
+
+        sum_img = nib.Nifti1Image(accum, ref_img.affine, ref_img.header)
+        sum_img.set_data_dtype(np.float32)
+        nib.save(sum_img, out_path)
+        print(f"  [sum] {subj}: saved {out_name}  ({n_used} maps summed)")
+        saved[subj] = out_path
+
+    return saved
+
+
 def plot_mrsi_mosaic(
     mrs_filenames: list,
     mrs_dir: str,
@@ -176,7 +238,7 @@ def plot_mrsi_mosaic(
     cols: int = 3,
 ) -> None:
     """
-    Overlay multiple MRSI concentration maps **in their own native space**,
+    Overlay multiple MRSI concentration maps in their own native space,
     without any T1w background and without registration.
     """
     n    = len(mrs_filenames)

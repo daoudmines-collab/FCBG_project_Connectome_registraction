@@ -1,6 +1,7 @@
 import os
 import nibabel as nib
 import bids_structure
+import utils
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR     = os.path.join(PROJECT_ROOT, "data")
@@ -28,4 +29,10 @@ mrs_files = sorted(
 
 t1w_img     = nib.load(T1W_PATH)
 mrs_example = nib.load(os.path.join(MRS_DIR, mrs_files[0]))
+
+# Pre-computed sum of all metabolite maps (one per subject, native MRS space)
+SUM_NAME  = f"{SUBJ}_{SES}_acq-OrigRes_desc-AllMetabSum_mrsi.nii.gz"
+SUM_PATH  = os.path.join(MRS_DIR, SUM_NAME)
+utils.save_metabolite_sum(BIDS_DIR, ses=SES, overwrite=True)
+sum_img   = nib.load(SUM_PATH) if os.path.exists(SUM_PATH) else None
 
