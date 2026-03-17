@@ -193,6 +193,11 @@ def _convert_mrs(
     ses_label = f"ses-{session:02d}"
     mrs_out   = bids_root / f"sub-{subject}" / ses_label / "mrs"
 
+    # Always create the anat/ directory so subjects without a T1w scan still
+    # have the expected BIDS folder hierarchy.
+    anat_out = bids_root / f"sub-{subject}" / ses_label / "anat"
+    anat_out.mkdir(parents=True, exist_ok=True)
+
     for nii in sorted(sub_dir.glob("*.nii.gz")):
         desc = _metabolite_label(nii.name)
         acq  = "OrigRes" if nii.name.startswith("OrigRes_") else None
