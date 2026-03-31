@@ -931,7 +931,7 @@ def run_total_pipeline(
     overwrite: bool = False,
     t1w_brain_mask_ds_path: str | None = None):
 
-    # Step 1 – RAS canonical reoriented metabolite sum
+    # Step 1 – reorient metabolite sum
     sum_ras_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
     sum_ras_path = os.path.join(output_dir, sum_ras_name)
     save_reoriented_metabolite_sum(bids_dir, ses=ses, out_dir=output_dir, overwrite=overwrite)
@@ -2976,5 +2976,417 @@ def plot_bet_vs_water_mask(
     fig.legend(handles=legend_patches, loc="lower center", ncol=3,
                frameon=False, labelcolor="white", fontsize=9,
                bbox_to_anchor=(0.5, -0.02))
+    plt.tight_layout()
+    plt.show()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Section 25 – Registration methodology comparison (NMI + visual thumbnails)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _compute_nmi_vs_reference(
+    reg_imgs: dict,
+    reference_img: nib.Nifti1Image,
+) -> list:
+    """NMI + coverage for each T1w-in-MRSI-space image against a reference."""
+    ref_data = reference_img.get_fdata().astype(np.float32)
+    ref_mask = ref_data > 0
+    n_ref   = int(ref_mask.sum())
+    records = []
+    for label, img in reg_imgs.items():
+        if img is None:
+            continue
+        # Resample to reference grid if geometries differ
+        if img.shape != reference_img.shape or not np.allclose(img.affine, reference_img.affine, atol=1e-3):
+            img_r = resample_from_to(img, reference_img, order=1)
+            mv_data = img_r.get_fdata().astype(np.float32)
+        else:
+            mv_data = img.get_fdata().astype(np.float32)
+        overlap  = ref_mask & (mv_data > 0)
+        coverage = float(overlap.sum()) / n_ref if n_ref > 0 else 0.0
+        nmi = _mutual_information(ref_data[overlap], mv_data[overlap]) if overlap.sum() > 10 else 0.0
+        records.append({"label": label, "nmi": nmi, "coverage": coverage})
+    records.sort(key=lambda r: r["nmi"], reverse=True)
+    return records
+
+
+def plot_multi_reg_nmi_comparison(
+    reg_imgs: dict,
+    water_img: nib.Nifti1Image,
+    subj: str = "sub-01",
+    ses: str = "ses-01",
+) -> None:
+    """Compare multiple T1w→MRSI registrations visually and via NMI.
+
+    Parameters
+    ----------
+    reg_imgs : dict
+        {label: nib.Nifti1Image} — each value is a T1w image already in
+        MRSI space (registered).  ``None`` values are skipped.
+    water_img : nib.Nifti1Image
+        Water signal map in MRSI space — used as reference both for the
+        NMI computation and as background/contour in the thumbnails.
+    """
+    metrics = _compute_nmi_vs_reference(reg_imgs, water_img)
+    if not metrics:
+        print("[reg-nmi] nothing to plot — reg_imgs is empty or all None.")
+        return
+
+    water_data = water_img.get_fdata().astype(np.float32)
+    mid_z      = water_data.shape[2] // 2
+    wsl        = water_data[:, :, mid_z]
+    vmax_w     = float(np.nanpercentile(wsl[wsl > 0], 99)) if (wsl > 0).any() else 1.0
+
+    n_regs = len(metrics)
+    BG, PAN, GREY, TXT = "#0d0d0d", "#1a1a1a", "#444444", "white"
+
+    n_cols  = n_regs + 1   # water reference + one col per reg
+    fig = plt.figure(figsize=(3.5 * n_cols, 9), facecolor=BG)
+    gs  = fig.add_gridspec(2, n_cols,
+                           height_ratios=[1.3, 1],
+                           hspace=0.5, wspace=0.3)
+
+    # ── Row 0: thumbnail panels ──────────────────────────────────────────
+    ax_w = fig.add_subplot(gs[0, 0])
+    ax_w.set_facecolor(BG)
+    ax_w.imshow(wsl.T, origin="lower", cmap="Blues", vmin=0, vmax=vmax_w,
+                interpolation="nearest")
+    ax_w.set_title("Water signal\n(reference)", color=TXT, fontsize=9, pad=4)
+    ax_w.axis("off")
+
+    for col_i, rec in enumerate(metrics):
+        label = rec["label"]
+        img   = reg_imgs[label]
+        ax    = fig.add_subplot(gs[0, col_i + 1])
+        ax.set_facecolor(BG)
+
+        # Resample to water grid for display
+        if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
+            img_r = resample_from_to(img, water_img, order=1)
+            t1w_data = img_r.get_fdata().astype(np.float32)
+        else:
+            t1w_data = img.get_fdata().astype(np.float32)
+
+        t1w_sl = t1w_data[:, :, mid_z]
+        vmax_t = float(np.nanpercentile(t1w_sl[t1w_sl > 0], 99)) if (t1w_sl > 0).any() else 1.0
+        ax.imshow(t1w_sl.T, origin="lower", cmap="gray", vmin=0, vmax=vmax_t,
+                  alpha=0.9, interpolation="nearest")
+        # Water signal contour as alignment guide
+        ax.contour(wsl.T, levels=[0.15 * vmax_w], colors=["#4fc3f7"],
+                   linewidths=0.8, alpha=0.95)
+
+        short = label
+        ax.set_title(f"{short}\nNMI={rec['nmi']:.3f}  cov={rec['coverage']:.2f}",
+                     color=TXT, fontsize=8, pad=4)
+        ax.axis("off")
+
+    # ── Row 1: NMI lollipop (spanning all columns) ───────────────────────
+    ax_lol = fig.add_subplot(gs[1, :])
+    ax_lol.set_facecolor(PAN)
+
+    labels_all = [r["label"] for r in metrics]
+    nmis       = np.array([r["nmi"]      for r in metrics])
+    covs       = np.array([r["coverage"] for r in metrics])
+    y          = np.arange(len(labels_all))
+
+    vmin_c, vmax_c = covs.min(), max(covs.max(), 1e-6)
+    ax_lol.hlines(y, 0, nmis, color=GREY, linewidth=1.8, zorder=1)
+    sc = ax_lol.scatter(nmis, y, c=covs, cmap="viridis",
+                        vmin=vmin_c, vmax=vmax_c,
+                        s=110, zorder=3, edgecolors="white", linewidths=0.5)
+    for i, (nv, cv) in enumerate(zip(nmis, covs)):
+        ax_lol.annotate(f"  {nv:.3f}  (cov {cv:.2f})", (nv, i),
+                        textcoords="offset points", xytext=(4, 0),
+                        color="lightgrey", fontsize=8.5, va="center")
+
+    ax_lol.set_yticks(y)
+    ax_lol.set_yticklabels(labels_all, color=TXT, fontsize=9)
+    ax_lol.set_xlabel("NMI vs water signal  (higher = better alignment)",
+                      color=TXT, fontsize=9)
+    ax_lol.set_title("Registration quality comparison  –  all methods",
+                     color=TXT, fontsize=10, pad=6)
+    ax_lol.tick_params(colors=TXT, labelsize=9)
+    ax_lol.grid(axis="x", color=GREY, linewidth=0.5, zorder=0)
+    for sp in ax_lol.spines.values():
+        sp.set_edgecolor(GREY)
+
+    sm = plt.cm.ScalarMappable(cmap="viridis",
+                               norm=plt.Normalize(vmin=vmin_c, vmax=vmax_c))
+    sm.set_array([])
+    cb = fig.colorbar(sm, ax=ax_lol, orientation="vertical",
+                      fraction=0.015, pad=0.01, shrink=0.8)
+    cb.set_label("Coverage", color=TXT, fontsize=8)
+    cb.ax.yaxis.set_tick_params(color=TXT, labelcolor=TXT)
+
+    fig.suptitle(
+        f"{subj}  {ses}  –  T1w → MRSI  registration methodology comparison\n"
+        "Thumbnails: T1w (gray) + water signal contour (blue).  "
+        "Bar: NMI vs water signal, colour = coverage fraction.",
+        color=TXT, fontsize=10, y=1.01,
+    )
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\n{'Method':<35}  {'NMI':>7}  {'Coverage':>9}")
+    print("─" * 56)
+    for r in metrics:
+        print(f"{r['label']:<35}  {r['nmi']:>7.4f}  {r['coverage']:>9.3f}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Section 26 – Tissue-based metrics (FAST PVE fractions + GM/WM separation)
+# ──────────────────────────────────────────────────────────────────────────
+
+def compute_tissue_fractions_in_mrsi(
+    pve_gm_path: str,
+    pve_wm_path: str,
+    pve_csf_path: str,
+    mrsi_ref_path: str,
+    xfm_path: str,
+    out_dir: str,
+    subj: str = "sub-01",
+    ses: str = "ses-01",
+    overwrite: bool = False,
+) -> dict:
+    """Warp FAST PVE maps from T1w space into MRSI voxel space via ANTs.
+
+    Returns
+    -------
+    dict with keys ``gm``, ``wm``, ``csf`` — each a ``nib.Nifti1Image``
+    on the MRSI grid, or ``None`` if the source file is missing.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    def _warp(pve_path, tissue_label):
+        if not pve_path or not os.path.exists(pve_path):
+            return None
+        out_name = f"{subj}_{ses}_desc-{tissue_label}PVE_mrsi.nii.gz"
+        out_path = os.path.join(out_dir, out_name)
+        if os.path.exists(out_path) and not overwrite:
+            return nib.load(out_path)
+        cmd = [
+            "antsApplyTransforms", "-d", "3",
+            "-i", pve_path,
+            "-r", mrsi_ref_path,
+            "-t", xfm_path,
+            "-n", "Linear",
+            "-o", out_path,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        print(f"  [tissue-pve] warped {tissue_label} → {out_name}")
+        return nib.load(out_path)
+
+    return {
+        "gm":  _warp(pve_gm_path,  "GM"),
+        "wm":  _warp(pve_wm_path,  "WM"),
+        "csf": _warp(pve_csf_path, "CSF"),
+    }
+
+
+def plot_tissue_metabolite_metrics(
+    tissue_fracs: dict,
+    mrsi_conc_imgs: dict,
+    water_img: nib.Nifti1Image,
+    subj: str = "sub-01",
+    ses: str = "ses-01",
+) -> None:
+    """Tissue-based registration quality metrics.
+
+    Two panels:
+
+    **Row 0** — GM / WM / CSF partial-volume fraction maps overlaid on the
+    water signal map.  Each metabolite MRSI voxel is coloured by its tissue
+    composition.  Good registration → fraction maps look anatomically plausible.
+
+    **Row 1** — Biological plausibility scatter: for each metabolite the mean
+    concentration in predominantly-GM voxels (x-axis) vs predominantly-WM
+    voxels (y-axis).  The water signal is always shown as a reference.
+    Metabolites on the y=x diagonal show no tissue preference; those above
+    the line are WM-dominant (e.g. Cho, Cr) and below are GM-dominant
+    (e.g. Glu, Gln).
+
+    Parameters
+    ----------
+    tissue_fracs : dict  {gm, wm, csf} — PVE maps in MRSI space.
+    mrsi_conc_imgs : dict  {metabolite_label: nib.Nifti1Image} — concentration
+        maps in original MRSI space.  Water signal should be included as
+        a reference under the key ``"Water"``.
+    water_img : the raw water signal image in MRSI space.
+    """
+    gm_img  = tissue_fracs.get("gm")
+    wm_img  = tissue_fracs.get("wm")
+    csf_img = tissue_fracs.get("csf")
+
+    if gm_img is None and wm_img is None:
+        print("[tissue-metrics] no PVE maps available — run compute_tissue_fractions_in_mrsi first.")
+        return
+
+    BG, PAN, GREY, TXT = "#0d0d0d", "#1a1a1a", "#444444", "white"
+
+    # ── Common MRSI grid reference ────────────────────────────────────────
+    water_data = water_img.get_fdata().astype(np.float32)
+    water_mask = water_data > 0
+    mid_z      = water_data.shape[2] // 2
+    wsl        = water_data[:, :, mid_z]
+    vmax_w     = float(np.nanpercentile(wsl[wsl > 0], 99)) if (wsl > 0).any() else 1.0
+
+    def _get_slice(img):
+        if img is None:
+            return None
+        d = img.get_fdata().astype(np.float32)
+        # clip negatives from linear interpolation
+        d = np.clip(d, 0, None)
+        if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
+            d = resample_from_to(img, water_img, order=1).get_fdata().astype(np.float32)
+            d = np.clip(d, 0, None)
+        return d[:, :, mid_z]
+
+    gm_sl  = _get_slice(gm_img)
+    wm_sl  = _get_slice(wm_img)
+    csf_sl = _get_slice(csf_img)
+
+    # ── Flatten PVE data to MRSI voxels ──────────────────────────────────
+    def _flat(img):
+        if img is None:
+            return None
+        d = img.get_fdata().astype(np.float32)
+        d = np.clip(d, 0, None)
+        if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
+            d = resample_from_to(img, water_img, order=1).get_fdata().astype(np.float32)
+            d = np.clip(d, 0, None)
+        return d[water_mask]
+
+    gm_flat  = _flat(gm_img)
+    wm_flat  = _flat(wm_img)
+
+    # Threshold: voxels where one tissue dominates (>40% PVE)
+    THR = 0.40
+    gm_vox = (gm_flat > THR) if gm_flat is not None else None
+    wm_vox = (wm_flat > THR) if wm_flat is not None else None
+
+    # ── Per-metabolite GM mean / WM mean ─────────────────────────────────
+    scatter_pts = []   # list of (label, gm_mean, wm_mean, is_water)
+    all_imgs = dict(mrsi_conc_imgs)
+    all_imgs["Water"] = water_img   # always include water as reference
+
+    for label, img in all_imgs.items():
+        if img is None:
+            continue
+        if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
+            d = resample_from_to(img, water_img, order=1).get_fdata().astype(np.float32)
+        else:
+            d = img.get_fdata().astype(np.float32)
+        d = np.clip(d, 0, None)
+        vals = d[water_mask]
+
+        # Normalise to [0,1] so all metabolites are on the same scale
+        v_max = vals.max()
+        if v_max < 1e-9:
+            continue
+        vals_n = vals / v_max
+
+        gm_mean  = float(vals_n[gm_vox].mean()) if gm_vox is not None and gm_vox.sum() > 0 else np.nan
+        wm_mean  = float(vals_n[wm_vox].mean()) if wm_vox is not None and wm_vox.sum() > 0 else np.nan
+        scatter_pts.append((label, gm_mean, wm_mean, label == "Water"))
+
+    scatter_pts = [(lbl, gm, wm, iw)
+                   for lbl, gm, wm, iw in scatter_pts
+                   if not np.isnan(gm) and not np.isnan(wm)]
+
+    # ── Figure ───────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(17, 10), facecolor=BG)
+    gs  = fig.add_gridspec(2, 4, hspace=0.55, wspace=0.35,
+                           height_ratios=[1, 1.2])
+
+    # --- Row 0: tissue fraction maps ---
+    pve_panels = [
+        ("Water signal",  wsl,  "Blues",   vmax_w),
+        ("GM fraction",   gm_sl,  "Greens",  1.0),
+        ("WM fraction",   wm_sl,  "Oranges", 1.0),
+        ("CSF fraction",  csf_sl, "Purples", 1.0),
+    ]
+    for col, (title, slc, cmap, vmax_panel) in enumerate(pve_panels):
+        ax = fig.add_subplot(gs[0, col])
+        ax.set_facecolor(BG)
+        if slc is not None:
+            ax.imshow(slc.T, origin="lower", cmap=cmap,
+                      vmin=0, vmax=vmax_panel, interpolation="nearest")
+            # Water contour reference on non-water panels
+            if col > 0:
+                ax.contour(wsl.T, levels=[0.15 * vmax_w], colors=["#4fc3f7"],
+                           linewidths=0.7, alpha=0.85)
+        ax.set_title(title, color=TXT, fontsize=10, pad=4)
+        ax.axis("off")
+
+    # --- Row 1: biological plausibility scatter ---
+    ax_sc = fig.add_subplot(gs[1, :3])
+    ax_sc.set_facecolor(PAN)
+
+    if scatter_pts:
+        cmap_sc  = plt.get_cmap("tab20")
+        diag_max = max(max(gm for _, gm, _, _ in scatter_pts),
+                       max(wm for _, _, wm, _ in scatter_pts)) * 1.05
+        ax_sc.plot([0, diag_max], [0, diag_max], "--",
+                   color="white", alpha=0.35, linewidth=1.0,
+                   label="y = x  (no tissue preference)", zorder=1)
+
+        for i, (lbl, gm_m, wm_m, is_water) in enumerate(scatter_pts):
+            color  = "#4fc3f7" if is_water else cmap_sc(i / max(len(scatter_pts), 1))
+            marker = "*" if is_water else "o"
+            size   = 220 if is_water else 80
+            ax_sc.scatter(gm_m, wm_m, color=color, marker=marker,
+                          s=size, zorder=4 if is_water else 3,
+                          edgecolors="white", linewidths=0.4)
+            offset = (4, 5) if not is_water else (4, 8)
+            ax_sc.annotate(lbl, (gm_m, wm_m),
+                           textcoords="offset points", xytext=offset,
+                           fontsize=7.5, color=("cyan" if is_water else "lightgrey"),
+                           zorder=5)
+
+        ax_sc.set_xlabel("Mean (normalised conc.)  in GM-dominant voxels  (PVE > 40%)",
+                         color=TXT, fontsize=9)
+        ax_sc.set_ylabel("Mean (normalised conc.)  in WM-dominant voxels  (PVE > 40%)",
+                         color=TXT, fontsize=9)
+        ax_sc.set_title(
+            "Biological plausibility — GM vs WM metabolite separation\n"
+            "Above diagonal = WM-dominant  |  Below = GM-dominant  |  "
+            "★ = water (reference)",
+            color=TXT, fontsize=10, pad=6,
+        )
+        ax_sc.tick_params(colors=TXT, labelsize=9)
+        ax_sc.grid(color=GREY, linewidth=0.4, zorder=0)
+        for sp in ax_sc.spines.values():
+            sp.set_edgecolor(GREY)
+        ax_sc.legend(frameon=False, labelcolor="white", fontsize=8)
+
+    # --- Row 1 col 3: mean tissue composition bar ---
+    ax_bar = fig.add_subplot(gs[1, 3])
+    ax_bar.set_facecolor(PAN)
+    if gm_flat is not None and wm_flat is not None:
+        gm_mean_all  = float(gm_flat.mean())
+        wm_mean_all  = float(wm_flat.mean())
+        csf_flat = _flat(csf_img)
+        csf_mean_all = float(csf_flat.mean()) if csf_flat is not None else 0.0
+        total = gm_mean_all + wm_mean_all + csf_mean_all + 1e-9
+        fracs  = [gm_mean_all / total, wm_mean_all / total, csf_mean_all / total]
+        colors = ["#43a047", "#fb8c00", "#7e57c2"]
+        labels_bar = [f"GM\n{100*fracs[0]:.1f}%", f"WM\n{100*fracs[1]:.1f}%",
+                      f"CSF\n{100*fracs[2]:.1f}%"]
+        bars = ax_bar.bar(labels_bar, fracs, color=colors, edgecolor="#222", width=0.5)
+        ax_bar.set_facecolor(PAN)
+        ax_bar.set_ylim(0, 1)
+        ax_bar.set_ylabel("Mean PVE fraction across MRSI voxels", color=TXT, fontsize=8)
+        ax_bar.set_title("Avg tissue composition\nacross water-mask voxels",
+                         color=TXT, fontsize=9, pad=4)
+        ax_bar.tick_params(colors=TXT, labelsize=9)
+        for sp in ax_bar.spines.values():
+            sp.set_edgecolor(GREY)
+
+    fig.suptitle(
+        f"{subj}  {ses}  –  Tissue-based registration quality\n"
+        "Row 1: GM / WM / CSF fraction maps (water contour in blue).  "
+        "Row 2: metabolite GM-mean vs WM-mean scatter (normalised concentrations).",
+        color=TXT, fontsize=10, y=1.01,
+    )
     plt.tight_layout()
     plt.show()

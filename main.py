@@ -304,6 +304,9 @@ if not os.path.exists(T1W_BRAIN_MASK_DS_PATH) and os.path.exists(T1W_BRAIN_MASK_
 #     n_classes=3,
 #     overwrite=False,
 # )
+# PVE_CSF_PATH = f"{SEG_PREFIX}_pve_0.nii.gz"
+# PVE_GM_PATH  = f"{SEG_PREFIX}_pve_1.nii.gz"
+# PVE_WM_PATH  = f"{SEG_PREFIX}_pve_2.nii.gz"
 
 # # Atlas-based parcellation: FLIRT to MNI152, Harvard-Oxford cortical + subcortical
 # ATLAS_PREFIX = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_atlas")
@@ -325,7 +328,7 @@ t1w_brain_in_gly_img, brain_gly_transforms = utils.register_t1w_to_mrsi_weighted
     mask_path=MASK_PATH,
     out_path=T1W_BRAIN_IN_GLY_PATH,
     transform_path=T1W_BRAIN_IN_GLY_XFM,
-    overwrite=True,
+    overwrite=False,
     moving_mask_path=_brain_mask_arg,
 )
 
@@ -340,7 +343,7 @@ if sum_img is not None:
         mask_path=MASK_PATH,
         out_path=T1W_BRAIN_IN_SUM_PATH,
         transform_path=T1W_BRAIN_IN_SUM_XFM,
-        overwrite=True,
+        overwrite=False,
         moving_mask_path=_brain_mask_arg,
     )
 else:
@@ -379,7 +382,7 @@ else:
     subj=SUBJ,
     ses=SES,
     output_dir=OUTPUT_DIR,
-    overwrite=True,
+    overwrite=False,
     t1w_brain_mask_ds_path=_brain_mask_arg,
 )
 
@@ -424,4 +427,46 @@ t1w_in_water_img, t1w_water_transforms = utils.register_t1w_to_mrsi_weighted(
     overwrite=False,
     moving_mask_path=T1W_BRAIN_MASK_DS_PATH if os.path.exists(T1W_BRAIN_MASK_DS_PATH) else None,
 )
+
+# # ──────────────────────────────────────────────────────────────────────────
+# # Section 25 – Registration comparison dict (T1w images in MRSI space)
+# # ──────────────────────────────────────────────────────────────────────────
+# REG_COMPARE_IMGS = {}
+# for _label, _path in [
+#     ("Reg10 T1w→Gly",       T1W_IN_GLY_W_PATH),
+#     ("Reg11 T1w→Sum",       T1W_IN_SUM_W_PATH),
+#     ("Reg14 Brain→Gly",     T1W_BRAIN_IN_GLY_PATH),
+#     ("Reg15 Brain→Sum",     T1W_BRAIN_IN_SUM_PATH),
+#     ("Reg18 T1w→Water",     T1W_IN_WATER_PATH),
+# ]:
+#     if os.path.exists(_path):
+#         REG_COMPARE_IMGS[_label] = nib.load(_path)
+
+# # ──────────────────────────────────────────────────────────────────────────
+# # Section 26 – Tissue fractions in MRSI space + original metabolite maps
+# # ──────────────────────────────────────────────────────────────────────────
+# # Warp FAST GM/WM/CSF PVE maps from T1w space → MRSI space using Reg-11
+# # forward transform (T1w DS → MRSI sum).  ANTs physical-space transforms
+# # are valid for the full-res T1w PVE maps since they share the same
+# # physical coordinate system as T1w DS.
+# TISSUE_FRACS = {}
+# if os.path.exists(T1W_IN_SUM_W_XFM) and os.path.exists(PVE_GM_PATH):
+#     TISSUE_FRACS = utils.compute_tissue_fractions_in_mrsi(
+#         pve_gm_path=PVE_GM_PATH,
+#         pve_wm_path=PVE_WM_PATH,
+#         pve_csf_path=PVE_CSF_PATH,
+#         mrsi_ref_path=SUM_PATH,
+#         xfm_path=T1W_IN_SUM_W_XFM,
+#         out_dir=OUTPUT_DIR,
+#         subj=SUBJ,
+#         ses=SES,
+#         overwrite=False,
+#     )
+
+# # All original-resolution metabolite concentration maps in MRSI space
+# MRSI_CONC_IMGS = {
+#     utils.metabolite_name(f): nib.load(os.path.join(MRS_DIR, f))
+#     for f in sorted(os.listdir(MRS_DIR))
+#     if f.endswith(".nii.gz") and "acq-OrigRes" in f and "AllMetab" not in f
+# }
 
