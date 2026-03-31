@@ -929,8 +929,7 @@ def run_total_pipeline(
     ses: str,
     output_dir: str,
     overwrite: bool = False,
-    t1w_brain_mask_ds_path: str | None = None,
-    init_from_path: str | None = None):
+    t1w_brain_mask_ds_path: str | None = None):
 
     # Step 1 – RAS canonical reoriented metabolite sum
     sum_ras_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
@@ -964,7 +963,6 @@ def run_total_pipeline(
             transform_path=t1w_brain_in_sum_ras_xfm,
             overwrite=overwrite,
             moving_mask_path=t1w_brain_mask_ds_path,
-            init_from_path=init_from_path,
         )
     else:
         t1w_brain_in_sum_ras_img, brain_sum_ras_transforms = None, None
