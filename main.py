@@ -58,9 +58,8 @@ WATER_MASKED_PATH = os.path.join(OUTPUT_DIR, WATER_MASKED_NAME)
 water_img = nib.load(WATER_PATH)
 mask_img = utils.fill_mask_holes(
     water_img_path=WATER_PATH,
-    threshold=0.0,
     out_mask_path=MASK_PATH,
-    overwrite=False,
+    overwrite=True,
 )
 
 # Boolean numpy mask ready to reuse 
@@ -212,7 +211,7 @@ T1W_IN_GLY_W_XFM  = T1W_IN_GLY_W_PATH.replace(".nii.gz", "_fwdtransform.mat")
 t1w_in_gly_w_img, inv_gly_w_transforms = utils.register_t1w_to_mrsi_weighted(
     fixed_path=BEST_MRSI_PATH,
     moving_path=T1W_DS_PATH,
-    mask_path=WATER_PATH,
+    mask_path=MASK_PATH,
     out_path=T1W_IN_GLY_W_PATH,
     transform_path=T1W_IN_GLY_W_XFM,
     overwrite=False,
@@ -226,7 +225,7 @@ if sum_img is not None:
     t1w_in_sum_w_img, inv_sum_w_transforms = utils.register_t1w_to_mrsi_weighted(
         fixed_path=SUM_PATH,
         moving_path=T1W_DS_PATH,
-        mask_path=WATER_PATH,
+        mask_path=MASK_PATH,
         out_path=T1W_IN_SUM_W_PATH,
         transform_path=T1W_IN_SUM_W_XFM,
         overwrite=False,
@@ -242,7 +241,7 @@ if inv_sum_w_transforms is not None:
     t1w_via_wsum_in_gly_img, _ = utils.register_t1w_to_mrsi_weighted(
         fixed_path=BEST_MRSI_PATH,
         moving_path=T1W_DS_PATH,
-        mask_path=WATER_PATH,
+        mask_path=MASK_PATH,
         out_path=T1W_VIA_WSUM_IN_GLY_PATH,
         transform_path=T1W_VIA_WSUM_IN_GLY_XFM,
         overwrite=False,
@@ -271,7 +270,7 @@ T1W_BRAIN_PATH = os.path.join(OUTPUT_DIR, T1W_BRAIN_NAME)
 t1w_brain_img = utils.skull_strip_t1w(
     in_path=T1W_PATH,
     out_path=T1W_BRAIN_PATH,
-    frac=0.3,
+    frac=0.5,
     overwrite=False,
 )
 
@@ -297,35 +296,42 @@ if not os.path.exists(T1W_BRAIN_MASK_DS_PATH) and os.path.exists(T1W_BRAIN_MASK_
     nib.save(_mask_ds, T1W_BRAIN_MASK_DS_PATH)
     print(f"  [bet-mask-ds] saved {T1W_BRAIN_MASK_DS_NAME}")
 
-# FSL FAST tissue segmentation on the full-resolution skull-stripped T1w
-SEG_PREFIX  = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_seg")
-seg_imgs = utils.segment_t1w(
-    brain_path=T1W_BRAIN_PATH,
-    out_prefix=SEG_PREFIX,
-    n_classes=3,
-    overwrite=False,
-)
+# # FSL FAST tissue segmentation on the full-resolution skull-stripped T1w
+# SEG_PREFIX  = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_seg")
+# seg_imgs = utils.segment_t1w(
+#     brain_path=T1W_BRAIN_PATH,
+#     out_prefix=SEG_PREFIX,
+#     n_classes=3,
+#     overwrite=False,
+# )
 
-# Atlas-based parcellation: FLIRT to MNI152, Harvard-Oxford cortical + subcortical
-ATLAS_PREFIX = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_atlas")
-atlas_imgs = utils.segment_t1w_atlas(
-    brain_path=T1W_BRAIN_PATH,
-    out_prefix=ATLAS_PREFIX,
-    nonlinear=False,
-    overwrite=False,
-)
+# # Atlas-based parcellation: FLIRT to MNI152, Harvard-Oxford cortical + subcortical
+# ATLAS_PREFIX = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_atlas")
+# atlas_imgs = utils.segment_t1w_atlas(
+#     brain_path=T1W_BRAIN_PATH,
+#     out_prefix=ATLAS_PREFIX,
+#     nonlinear=False,
+#     overwrite=False,
+# )
 
 # Registration 14: skull-stripped T1w DS to best SNR MRSI (Gly), water-weighted
 T1W_BRAIN_IN_GLY_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainT1wInGly_T1w.nii.gz"
 T1W_BRAIN_IN_GLY_PATH = os.path.join(OUTPUT_DIR, T1W_BRAIN_IN_GLY_NAME)
 T1W_BRAIN_IN_GLY_XFM  = T1W_BRAIN_IN_GLY_PATH.replace(".nii.gz", "_fwdtransform.mat")
+_brain_mask_arg = T1W_BRAIN_MASK_DS_PATH if os.path.exists(T1W_BRAIN_MASK_DS_PATH) else None
+# Seed from Reg-10 (T1w DS → Gly, water-weighted): the non-skull-stripped
+# registration is stable; refining from it avoids the CoM instability that
+# collapses when the skull-stripped brain CoM ≠ MRSI signal CoM.
+_gly_init = T1W_IN_GLY_W_XFM if os.path.exists(T1W_IN_GLY_W_XFM) else None
 t1w_brain_in_gly_img, brain_gly_transforms = utils.register_t1w_to_mrsi_weighted(
     fixed_path=BEST_MRSI_PATH,
     moving_path=T1W_DS_BRAIN_PATH,
-    mask_path=WATER_PATH,
+    mask_path=MASK_PATH,
     out_path=T1W_BRAIN_IN_GLY_PATH,
     transform_path=T1W_BRAIN_IN_GLY_XFM,
-    overwrite=False,
+    overwrite=True,
+    moving_mask_path=_brain_mask_arg,
+    init_from_path=_gly_init,
 )
 
 # Registration 15: skull-stripped T1w DS to sum MRSI, water-weighted
@@ -333,13 +339,17 @@ T1W_BRAIN_IN_SUM_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainT1wInSum_T1w.nii.gz
 T1W_BRAIN_IN_SUM_PATH = os.path.join(OUTPUT_DIR, T1W_BRAIN_IN_SUM_NAME)
 T1W_BRAIN_IN_SUM_XFM  = T1W_BRAIN_IN_SUM_PATH.replace(".nii.gz", "_fwdtransform.mat")
 if sum_img is not None:
+    # Seed from Reg-11 (T1w DS → Sum, water-weighted)
+    _sum_init = T1W_IN_SUM_W_XFM if os.path.exists(T1W_IN_SUM_W_XFM) else None
     t1w_brain_in_sum_img, brain_sum_transforms = utils.register_t1w_to_mrsi_weighted(
         fixed_path=SUM_PATH,
         moving_path=T1W_DS_BRAIN_PATH,
-        mask_path=WATER_PATH,
+        mask_path=MASK_PATH,
         out_path=T1W_BRAIN_IN_SUM_PATH,
         transform_path=T1W_BRAIN_IN_SUM_XFM,
-        overwrite=False,
+        overwrite=True,
+        moving_mask_path=_brain_mask_arg,
+        init_from_path=_sum_init,
     )
 else:
     t1w_brain_in_sum_img, brain_sum_transforms = None, None
@@ -352,7 +362,7 @@ if brain_sum_transforms is not None:
     t1w_brain_via_sum_in_gly_img, _ = utils.register_t1w_to_mrsi_weighted(
         fixed_path=BEST_MRSI_PATH,
         moving_path=T1W_DS_BRAIN_PATH,
-        mask_path=WATER_PATH,
+        mask_path=MASK_PATH,
         out_path=T1W_BRAIN_VIA_SUM_IN_GLY_PATH,
         transform_path=T1W_BRAIN_VIA_SUM_IN_GLY_XFM,
         overwrite=False,
@@ -377,7 +387,12 @@ else:
     subj=SUBJ,
     ses=SES,
     output_dir=OUTPUT_DIR,
-    overwrite=False,
+    overwrite=True,
+    t1w_brain_mask_ds_path=_brain_mask_arg,
+    # Seed Reg-17 from Reg-15 (skull-stripped → original sum): the fixed images
+    # share the same physical space up to the RAS reorientation, so the
+    # Reg-15 transform is a close-enough starting point for refinement.
+    init_from_path=T1W_BRAIN_IN_SUM_XFM if os.path.exists(T1W_BRAIN_IN_SUM_XFM) else None,
 )
 
 # Paths produced by the pipeline (used in the notebook)
@@ -393,8 +408,8 @@ sum_ras_img = nib.load(SUM_RAS_PATH) if os.path.exists(SUM_RAS_PATH) else None
 
 # Registration 18 t1w resampled to water vis ANTS with mask provided
 
-# Brain mask in MRSI space: use BET mask if available, fall back to water mask
-_reg18_mask = T1W_BRAIN_MASK_DS_PATH if os.path.exists(T1W_BRAIN_MASK_DS_PATH) else WATER_MASKED_PATH
+# Brain mask in MRSI space: use BET mask if available
+_reg18_mask = T1W_BRAIN_MASK_DS_PATH 
 
 # (a) Reg-11 sum transform reused  apply inv_sum_w_transforms to T1w DS
 T1W_IN_WATER_VIA17_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-T1wInWaterViaReg11_T1w.nii.gz"

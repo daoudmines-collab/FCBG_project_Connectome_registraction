@@ -81,10 +81,15 @@ def _fsl_reorient2std(in_path: str) -> nib.Nifti1Image:
     """
     import tempfile
     tmp_dir = tempfile.mkdtemp()
+    # Copy the input into the temp dir so FSL only sees one version of the
+    # file (avoids the "Could not find image" error that occurs when both a
+    # .nii and a .nii.gz with the same base name coexist in the source dir).
+    tmp_in  = os.path.join(tmp_dir, "input.nii.gz")
     tmp_out = os.path.join(tmp_dir, "reoriented.nii.gz")
     try:
+        shutil.copy2(in_path, tmp_in)
         subprocess.run(
-            ["fslreorient2std", in_path, tmp_out],
+            ["fslreorient2std", tmp_in, tmp_out],
             check=True, capture_output=True,
         )
         img = nib.load(tmp_out)
@@ -114,15 +119,23 @@ def img_info(img: nib.Nifti1Image, label: str):
 
 def fill_mask_holes(
     water_img_path: str,
-    threshold: float = 0.0,
     out_mask_path: str | None = None,
     overwrite: bool = False):
 
     water_img = nib.load(water_img_path)
     water_data = np.asarray(water_img.get_fdata(), dtype=np.float32)
 
+    # Cut the bottom 5% of positive water-signal values (noise floor) and
+    # keep the top 95% → threshold at the 5th percentile of positive voxels.
+    finite_vals = water_data[np.isfinite(water_data) & (water_data > 0)]
+    threshold = float(np.percentile(finite_vals, 5)) if finite_vals.size > 0 else 0.0
     base_mask = np.isfinite(water_data) & (water_data > threshold)
-    filled_mask = binary_fill_holes(base_mask)
+    # Fill holes slice-by-slice (axial = last axis) so that a hole open in
+    # one slice but closed in a neighbouring slice is not erroneously filled.
+    filled_mask = np.stack(
+        [binary_fill_holes(base_mask[..., z]) for z in range(base_mask.shape[2])],
+        axis=2,
+    )
 
     mask_data = filled_mask.astype(np.uint8)
     mask_img = nib.Nifti1Image(mask_data, water_img.affine, water_img.header)
@@ -364,7 +377,7 @@ def downsample_t1w_to_mrs(
 def skull_strip_t1w(
     in_path: str,
     out_path: str,
-    frac: float = 0.3,
+    frac: float = 0.5,
     overwrite: bool = False):
 
     if os.path.exists(out_path) and not overwrite:
@@ -734,7 +747,9 @@ def register_t1w_to_mrsi_weighted(
     out_path: str,
     transform_path: str,
     overwrite: bool = False,
-    init_transforms: list | None = None):
+    init_transforms: list | None = None,
+    moving_mask_path: str | None = None,
+    init_from_path: str | None = None):
 
     if os.path.exists(out_path) and not overwrite:
         print(f"[weighted-reg] already exists: {out_path}")
@@ -767,13 +782,24 @@ def register_t1w_to_mrsi_weighted(
         "--float", "1",
         "--output", f"[{out_prefix},{out_prefix}Warped.nii.gz]",
         "--interpolation", "Linear",
-        "--masks", f"[{mask_path},NULL]",
+        # ANTs does not accept "NULL" as a placeholder — omit the second
+        # entry entirely when no moving-image mask is available.
+        "--masks", "[{},{}]".format(mask_path, moving_mask_path) if moving_mask_path else "[{}]".format(mask_path),
+        # Seed from a pre-computed transform when provided (avoids CoM
+        # instability for skull-stripped images whose CoM differs from
+        # the MRSI signal CoM), otherwise fall back to CoM alignment.
+        "--initial-moving-transform",
+            init_from_path if init_from_path else f"[{fixed_path},{moving_path},1]",
 
         "--transform", "Rigid[0.1]",
-        "--metric", f"CC[{fixed_path},{moving_path},1,4]",
-        "--convergence", "[1000x500x250,1e-6,10]",
-        "--shrink-factors", "4x2x1",
-        "--smoothing-sigmas", "2x1x0vox",
+        # Mattes MI is voxel-wise (no neighborhood) so it works correctly
+        # at MRSI resolution (~10 mm voxels, ~9 brain voxels total) where
+        # CC always fails with "No valid points".  32 histogram bins is
+        # standard for same-modality; 80% random sampling balances speed/accuracy.
+        "--metric", f"Mattes[{fixed_path},{moving_path},1,32,Random,0.8]",
+        "--convergence", "[1000x500,1e-6,10]",
+        "--shrink-factors", "2x1",
+        "--smoothing-sigmas", "1x0vox",
     ]
 
     print("[weighted-reg] running antsRegistration...")
@@ -902,7 +928,9 @@ def run_total_pipeline(
     subj: str,
     ses: str,
     output_dir: str,
-    overwrite: bool = False):
+    overwrite: bool = False,
+    t1w_brain_mask_ds_path: str | None = None,
+    init_from_path: str | None = None):
 
     # Step 1 – RAS canonical reoriented metabolite sum
     sum_ras_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
@@ -910,13 +938,18 @@ def run_total_pipeline(
     save_reoriented_metabolite_sum(bids_dir, ses=ses, out_dir=output_dir, overwrite=overwrite)
     sum_ras_img = nib.load(sum_ras_path) if os.path.exists(sum_ras_path) else None
 
-    # Step 2 – RAS anonical reoriented water signal
+    # Step 2 – RAS canonical reoriented water signal
     water_ras_name = f"{subj}_{ses}_desc-WaterSignalRAS_mrsi.nii.gz"
     water_ras_path = os.path.join(output_dir, water_ras_name)
     if overwrite or not os.path.exists(water_ras_path):
         water_ras_img = _fsl_reorient2std(water_path)
         nib.save(water_ras_img, water_ras_path)
         print(f"  [ras] saved reoriented water: {water_ras_name}")
+    # Binary mask of the RAS water signal — ANTs --masks expects 0/1 values,
+    # not the raw continuous water signal intensity.
+    water_ras_mask_name = f"{subj}_{ses}_desc-WaterSignalRASMask_mrsi.nii.gz"
+    water_ras_mask_path = os.path.join(output_dir, water_ras_mask_name)
+    fill_mask_holes(water_ras_path, out_mask_path=water_ras_mask_path, overwrite=overwrite)
 
     # Step 3  Reg-17: skull stripped DS T1w to reoriented sum, water-masked
     t1w_brain_in_sum_ras_name = f"{subj}_{ses}_acq-MRSIres_desc-BrainT1wInSumRAS_T1w.nii.gz"
@@ -926,10 +959,12 @@ def run_total_pipeline(
         t1w_brain_in_sum_ras_img, brain_sum_ras_transforms = register_t1w_to_mrsi_weighted(
             fixed_path=sum_ras_path,
             moving_path=t1w_ds_brain_path,
-            mask_path=water_ras_path,
+            mask_path=water_ras_mask_path,
             out_path=t1w_brain_in_sum_ras_path,
             transform_path=t1w_brain_in_sum_ras_xfm,
             overwrite=overwrite,
+            moving_mask_path=t1w_brain_mask_ds_path,
+            init_from_path=init_from_path,
         )
     else:
         t1w_brain_in_sum_ras_img, brain_sum_ras_transforms = None, None
@@ -1775,7 +1810,9 @@ def plot_water_mask_comparison(
     and the recovered holes (voxels added by binary_fill_holes).
     """
     water_data = water_img.get_fdata()
-    raw_mask   = np.isfinite(water_data) & (water_data > 0)
+    _finite = water_data[np.isfinite(water_data) & (water_data > 0)]
+    _thr    = float(np.percentile(_finite, 5)) if _finite.size > 0 else 0.0  # cut bottom 5%
+    raw_mask   = np.isfinite(water_data) & (water_data > _thr)
     hole_map   = filled_mask & ~raw_mask
 
     mid = [s // 2 for s in raw_mask.shape]
@@ -2729,3 +2766,217 @@ def plot_atlas_segmentation(
             vol = cnt * vox_vol_mm3 / 1000.0
             print(f"  {int(idx):>4}  {lbl:<44}  {vol:>8.2f}")
         print(f"{'─'*60}")
+
+# ──────────────────────────────────────────────────────────────────────────
+# Mask diagnostic plots
+# ──────────────────────────────────────────────────────────────────────────
+
+def plot_mrsi_sum_mask_contours(
+    sum_img:        "nib.Nifti1Image",
+    water_mask_img: "nib.Nifti1Image",
+    bet_mask_img:   "nib.Nifti1Image | None",
+    subj: str = "sub-01",
+    ses:  str = "ses-01",
+    n_slices: int = 7,
+) -> None:
+    """Axial multi-slice panel: MRSI sum as greyscale background with three
+    contour overlays (all images must share the same voxel grid):
+
+    - Yellow : MRSI sum signal boundary (signal > 0)
+    - Blue   : water mask boundary
+    - Green  : BET brain mask boundary (omitted when *bet_mask_img* is None)
+    """
+    sum_data   = sum_img.get_fdata().astype(np.float32)
+    water_data = water_mask_img.get_fdata().astype(bool)
+    bet_data   = bet_mask_img.get_fdata().astype(bool) if bet_mask_img is not None else None
+
+    nz = sum_data.shape[2]
+    z_indices = np.linspace(0, nz - 1, n_slices, dtype=int)
+
+    sum_max = np.percentile(sum_data[sum_data > 0], 99) if sum_data.max() > 0 else 1.0
+
+    fig, axes = plt.subplots(1, n_slices, figsize=(3.2 * n_slices, 4), facecolor="black")
+    if n_slices == 1:
+        axes = [axes]
+
+    legend_handles = []
+    for ax, z in zip(axes, z_indices):
+        ax.set_facecolor("black")
+        slc = sum_data[:, :, z].T
+        ax.imshow(slc, origin="lower", cmap="gray",
+                  vmin=0, vmax=sum_max, interpolation="nearest")
+
+        # Sum signal contour (yellow)
+        sum_bin = (sum_data[:, :, z] > 0).astype(np.float32).T
+        if sum_bin.max() > 0:
+            ax.contour(sum_bin, levels=[0.5], colors=["gold"], linewidths=1.2)
+            if not legend_handles:
+                legend_handles.append(
+                    plt.matplotlib.lines.Line2D([], [], color="gold",
+                                                linewidth=1.5, label="Sum signal boundary"))
+
+        # Water mask contour (blue)
+        water_bin = water_data[:, :, z].astype(np.float32).T
+        if water_bin.max() > 0:
+            ax.contour(water_bin, levels=[0.5], colors=["deepskyblue"], linewidths=1.2)
+            if len(legend_handles) < 2:
+                legend_handles.append(
+                    plt.matplotlib.lines.Line2D([], [], color="deepskyblue",
+                                                linewidth=1.5, label="Water mask boundary"))
+
+        # BET mask contour (green)
+        if bet_data is not None:
+            bet_bin = bet_data[:, :, z].astype(np.float32).T
+            if bet_bin.max() > 0:
+                ax.contour(bet_bin, levels=[0.5], colors=["limegreen"], linewidths=1.2)
+                if len(legend_handles) < 3:
+                    legend_handles.append(
+                        plt.matplotlib.lines.Line2D([], [], color="limegreen",
+                                                    linewidth=1.5, label="BET brain mask boundary"))
+
+        ax.set_title(f"z={z}", color="white", fontsize=9)
+        ax.axis("off")
+
+    fig.suptitle(f"{subj}  {ses}  –  MRSI sum signal vs mask contours",
+                 color="white", fontsize=12)
+    if legend_handles:
+        fig.legend(handles=legend_handles, loc="lower center", ncol=len(legend_handles),
+                   frameon=False, labelcolor="white", fontsize=9,
+                   bbox_to_anchor=(0.5, -0.04))
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_bet_vs_water_mask(
+    bet_mask_img:    "nib.Nifti1Image",
+    water_mask_img:  "nib.Nifti1Image",
+    t1w_ds_img:      "nib.Nifti1Image",
+    subj:            str = "sub-01",
+    ses:             str = "ses-01",
+    active_mask_name: str | None = None,
+    n_slices: int = 7,
+) -> None:
+    """Three-row axial mosaic comparing the BET brain mask and the water mask,
+    both on the MRSI voxel grid:
+
+    - Row 1 : BET mask (green overlay) on DS T1w background
+    - Row 2 : Water mask (blue overlay) on DS T1w background
+    - Row 3 : Comparison — BET-only (red), water-only (blue), overlap (grey)
+
+    Also prints a quantitative table (volumes, Dice, Jaccard).
+    """
+    bet_data   = bet_mask_img.get_fdata().astype(bool)
+    water_data = water_mask_img.get_fdata().astype(bool)
+    t1w_data   = t1w_ds_img.get_fdata().astype(np.float32)
+
+    vox_vol_mm3 = float(np.abs(np.linalg.det(bet_mask_img.affine[:3, :3])))
+
+    intersection  = bet_data & water_data
+    bet_only      = bet_data & ~water_data
+    water_only    = water_data & ~bet_data
+
+    n_bet    = int(bet_data.sum())
+    n_water  = int(water_data.sum())
+    n_inter  = int(intersection.sum())
+    n_bonly  = int(bet_only.sum())
+    n_wonly  = int(water_only.sum())
+
+    dice    = 2 * n_inter / (n_bet + n_water + 1e-10)
+    jaccard = n_inter / (n_bet + n_water - n_inter + 1e-10)
+
+    # ── Text table ────────────────────────────────────────────────────────
+    sep = "─" * 44
+    print(sep)
+    print(f"  Mask comparison (MRSI grid)")
+    print(sep)
+    print(f"  BET mask volume   : {n_bet   * vox_vol_mm3/1000:>8.1f} mL  ({n_bet:>6} vox)")
+    print(f"  Water mask volume : {n_water * vox_vol_mm3/1000:>8.1f} mL  ({n_water:>6} vox)")
+    print(f"  Intersection      : {n_inter * vox_vol_mm3/1000:>8.1f} mL  ({n_inter:>6} vox)")
+    print(f"  BET-only voxels   : {n_bonly * vox_vol_mm3/1000:>8.1f} mL  ({n_bonly:>6} vox)")
+    print(f"  Water-only voxels : {n_wonly * vox_vol_mm3/1000:>8.1f} mL  ({n_wonly:>6} vox)")
+    print(f"  Dice coefficient  : {dice:.4f}  (1.0 = identical)")
+    print(f"  Jaccard index     : {jaccard:.4f}")
+    print(f"  Masks are identical : {bool(np.array_equal(bet_data, water_data))}")
+    print(sep)
+    if active_mask_name:
+        print(f"\n  ACTIVE mask for Reg 18 : {active_mask_name}")
+
+    # ── Axial mosaic ──────────────────────────────────────────────────────
+    nz = bet_data.shape[2]
+    z_indices = np.linspace(0, nz - 1, n_slices, dtype=int)
+
+    t1w_max = np.percentile(t1w_data[t1w_data > 0], 99) if t1w_data.max() > 0 else 1.0
+
+    fig, axes = plt.subplots(3, n_slices,
+                             figsize=(2.8 * n_slices, 9),
+                             facecolor="black")
+
+    row_labels = ["BET mask", "Water mask", "Comparison"]
+
+    for col, z in enumerate(z_indices):
+        t1w_slc = t1w_data[:, :, z].T
+        bet_slc = bet_data[:, :, z].T.astype(np.float32)
+        wat_slc = water_data[:, :, z].T.astype(np.float32)
+
+        # Row 0 – BET mask on T1w
+        ax = axes[0, col]
+        ax.set_facecolor("black")
+        ax.imshow(t1w_slc, origin="lower", cmap="gray",
+                  vmin=0, vmax=t1w_max, interpolation="nearest")
+        ax.imshow(np.ma.masked_where(bet_slc == 0, bet_slc),
+                  origin="lower", cmap="Greens", vmin=0, vmax=1,
+                  alpha=0.55, interpolation="nearest")
+        ax.set_title(f"z={z}", color="white", fontsize=8)
+        ax.axis("off")
+
+        # Row 1 – Water mask on T1w
+        ax = axes[1, col]
+        ax.set_facecolor("black")
+        ax.imshow(t1w_slc, origin="lower", cmap="gray",
+                  vmin=0, vmax=t1w_max, interpolation="nearest")
+        ax.imshow(np.ma.masked_where(wat_slc == 0, wat_slc),
+                  origin="lower", cmap="Blues", vmin=0, vmax=1,
+                  alpha=0.55, interpolation="nearest")
+        ax.axis("off")
+
+        # Row 2 – Comparison: BET-only red, water-only blue, overlap grey
+        ax = axes[2, col]
+        ax.set_facecolor("black")
+        ax.imshow(t1w_slc, origin="lower", cmap="gray",
+                  vmin=0, vmax=t1w_max, alpha=0.25, interpolation="nearest")
+        # overlap
+        ov = intersection[:, :, z].T.astype(np.float32)
+        ax.imshow(np.ma.masked_where(ov == 0, ov),
+                  origin="lower", cmap="gray", vmin=0, vmax=1,
+                  alpha=0.65, interpolation="nearest")
+        # water-only
+        wo = water_only[:, :, z].T.astype(np.float32)
+        ax.imshow(np.ma.masked_where(wo == 0, wo),
+                  origin="lower", cmap="Blues", vmin=0, vmax=1,
+                  alpha=0.80, interpolation="nearest")
+        # BET-only
+        bo = bet_only[:, :, z].T.astype(np.float32)
+        ax.imshow(np.ma.masked_where(bo == 0, bo),
+                  origin="lower", cmap="Reds", vmin=0, vmax=1,
+                  alpha=0.80, interpolation="nearest")
+        ax.axis("off")
+
+    for row, lbl in enumerate(row_labels):
+        axes[row, 0].set_ylabel(lbl, color="white", fontsize=10,
+                                rotation=90, labelpad=6)
+
+    legend_patches = [
+        plt.matplotlib.patches.Patch(color="red",        label=f"BET only ({n_bonly:,} vox)"),
+        plt.matplotlib.patches.Patch(color="dodgerblue", label=f"Water only ({n_wonly:,} vox)"),
+        plt.matplotlib.patches.Patch(color="grey",       label=f"Overlap ({n_inter:,} vox)"),
+    ]
+    title = (f"BET mask vs water mask (MRSI grid)  |  "
+             f"Dice={dice:.3f}  Jaccard={jaccard:.3f}")
+    if active_mask_name:
+        title += f"  |  Active: {active_mask_name}"
+    fig.suptitle(title, color="white", fontsize=10)
+    fig.legend(handles=legend_patches, loc="lower center", ncol=3,
+               frameon=False, labelcolor="white", fontsize=9,
+               bbox_to_anchor=(0.5, -0.02))
+    plt.tight_layout()
+    plt.show()
