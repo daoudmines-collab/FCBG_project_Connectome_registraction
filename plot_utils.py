@@ -1,5 +1,4 @@
 import os
-import re
 import ants
 import nibabel as nib
 import numpy as np
@@ -8,998 +7,16 @@ import ipywidgets as widgets
 from IPython.display import clear_output
 from nibabel.processing import resample_from_to
 from nilearn import plotting
-from scipy.ndimage import binary_fill_holes
-import subprocess
-import shutil
+from data_utils import (
+    metabolite_name,
+    get_nonzero_com,
+    estimate_coverage,
+    _nib_to_ants,
+    _mutual_information,
+)
 
-
-# ──────────────────────────────────────────────────────────────────────────
-# Internal helpers
-# ──────────────────────────────────────────────────────────────────────────
-
-
-def metabolite_name(filename: str):
-
-    m = re.search(r"desc-([^_]+)_mrsi", filename)
-    return m.group(1) if m else filename
-
-def get_nonzero_com(img: nib.Nifti1Image):
-
-    data = img.get_fdata()
-    mask = np.isfinite(data) & (data > 0)
-    if not mask.any():
-        return (0.0, 0.0, 0.0)
-    ijk = np.argwhere(mask).mean(axis=0)
-    xyz = nib.affines.apply_affine(img.affine, ijk)
-    return tuple(float(v) for v in xyz[:3])
-
-def estimate_coverage(
-    mrs_resampled_img: nib.Nifti1Image,
-    t1_img: nib.Nifti1Image):
-    
-    mrs = mrs_resampled_img.get_fdata()
-    t1  = t1_img.get_fdata()
-    brain   = np.isfinite(t1) & (t1 > 0)
-    covered = np.isfinite(mrs) & (mrs > 0)
-    frac = float(np.mean(covered[brain])) if brain.any() else 0.0
-    print(f"  Brain coverage: {frac * 100:.1f}%")
-    return frac
-
-def _nib_to_ants(data: np.ndarray, ref_img: nib.Nifti1Image):
- 
-    aff       = ref_img.affine
-    spacing   = np.sqrt(np.sum(np.square(aff[:3, :3]), axis=0))
-    origin    = aff[:3, 3].copy()
-    direction = aff[:3, :3] / spacing
-    direction[:2, :] *= -1   # RAS → LPS
-    origin[:2]       *= -1   # RAS → LPS
-    return ants.from_numpy(
-        data,
-        origin=origin.tolist(),
-        spacing=spacing.tolist(),
-        direction=direction.tolist(),
-    )
-
-def _mutual_information(x: np.ndarray, y: np.ndarray, bins: int = 32):
-    
-    hist_2d, _, _ = np.histogram2d(x, y, bins=bins)
-    hist_2d = hist_2d + 1e-10
-    pxy = hist_2d / hist_2d.sum()
-    px  = pxy.sum(axis=1)
-    py  = pxy.sum(axis=0)
-    hx  = -np.sum(px  * np.log(px))
-    hy  = -np.sum(py  * np.log(py))
-    hxy = -np.sum(pxy * np.log(pxy))
-    return float(2.0 * (hx + hy - hxy) / (hx + hy + 1e-10))
-
-
-def _fsl_reorient2std(in_path: str) -> nib.Nifti1Image:
-    """Reorient a NIfTI to standard (RAS) orientation using fslreorient2std.
-
-    Preferred over nibabel.as_closest_canonical because FSL also corrects the
-    qform/sform codes and matches the behaviour expected by antsRegistration.
-    """
-    import tempfile
-    tmp_dir = tempfile.mkdtemp()
-    # Copy the input into the temp dir so FSL only sees one version of the
-    # file (avoids the "Could not find image" error that occurs when both a
-    # .nii and a .nii.gz with the same base name coexist in the source dir).
-    tmp_in  = os.path.join(tmp_dir, "input.nii.gz")
-    tmp_out = os.path.join(tmp_dir, "reoriented.nii.gz")
-    try:
-        shutil.copy2(in_path, tmp_in)
-        subprocess.run(
-            ["fslreorient2std", tmp_in, tmp_out],
-            check=True, capture_output=True,
-        )
-        img = nib.load(tmp_out)
-        # Detach from the temp file before cleanup
-        img = nib.Nifti1Image(img.get_fdata(), img.affine, img.header)
-        return img
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"fslreorient2std failed for {in_path}:\n{e.stderr.decode()}"
-        ) from e
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Data utilities
-# ──────────────────────────────────────────────────────────────────────────
-
-def img_info(img: nib.Nifti1Image, label: str):
-
-    vox = np.sqrt(np.sum(img.affine[:3, :3] ** 2, axis=0))
-    print(f"{label}")
-    print(f"  shape      : {img.shape}")
-    print(f"  voxel size : {vox.round(3)} mm")
-    print(f"  dtype      : {img.get_data_dtype()}")
-    print()
-
-def fill_mask_holes(
-    water_img_path: str,
-    out_mask_path: str | None = None,
-    overwrite: bool = False):
-
-    water_img = nib.load(water_img_path)
-    water_data = np.asarray(water_img.get_fdata(), dtype=np.float32)
-
-    # Cut the bottom 5% of positive water-signal values (noise floor) and
-    # keep the top 95% → threshold at the 5th percentile of positive voxels.
-    finite_vals = water_data[np.isfinite(water_data) & (water_data > 0)]
-    threshold = float(np.percentile(finite_vals, 5)) if finite_vals.size > 0 else 0.0
-    base_mask = np.isfinite(water_data) & (water_data > threshold)
-    # Fill holes slice-by-slice (axial = last axis) so that a hole open in
-    # one slice but closed in a neighbouring slice is not erroneously filled.
-    filled_mask = np.stack(
-        [binary_fill_holes(base_mask[..., z]) for z in range(base_mask.shape[2])],
-        axis=2,
-    )
-
-    mask_data = filled_mask.astype(np.uint8)
-    mask_img = nib.Nifti1Image(mask_data, water_img.affine, water_img.header)
-    mask_img.set_data_dtype(np.uint8)
-
-    if out_mask_path and (overwrite or not os.path.exists(out_mask_path)):
-        nib.save(mask_img, out_mask_path)
-
-    return mask_img
-
-def rank_metabolites_by_snr(
-    mrs_dir: str,
-    subj: str = "sub-01",
-    ses: str = "ses-01",
-    top_n: int | None = None):
-    
-    snr_candidates = [
-        f for f in os.listdir(mrs_dir)
-        if "VoxelSNR" in f and f.endswith(".nii.gz")
-    ]
-    
-    snr_map = nib.load(os.path.join(mrs_dir, snr_candidates[0])).get_fdata()
-
-    # collect all individual OrigRes concentration maps
-    conc_files = sorted(
-        f for f in os.listdir(mrs_dir)
-        if f.endswith(".nii.gz")
-        and "acq-OrigRes" in f
-        and "AllMetabSum" not in f)
-
-    records = []
-    for fname in conc_files:
-        data = nib.load(os.path.join(mrs_dir, fname)).get_fdata()
-        # support mask: voxels with positive concentration AND positive SNR
-        mask = (data > 0) & (snr_map > 0)
-        if not mask.any():
-            continue
-        pos_data = data[mask]
-        snr_vals = snr_map[mask]
-        records.append({
-            "filename":   fname,
-            "metabolite": metabolite_name(fname),
-            "mean_snr":   float(np.mean(snr_vals)),
-            "median_snr": float(np.median(snr_vals)),
-            "n_voxels":   int(mask.sum()),
-            "cv":         float(np.std(pos_data) / (np.mean(pos_data) + 1e-12)),
-            "subj":       subj,
-            "ses":        ses})
-
-    records.sort(key=lambda r: r["mean_snr"], reverse=True)
-    for i, r in enumerate(records):
-        r["rank"] = i + 1
-
-    return records[:top_n] if top_n is not None else records
-
-def save_metabolite_sum(
-    bids_dir: str,
-    ses: str = "ses-01",
-    overwrite: bool = False,
-    out_dir: str | None = None):
-   
-    saved = {}
-
-    for subj in sorted(os.listdir(bids_dir)):
-        if not subj.startswith("sub-"):
-            continue
-
-        mrs_dir  = os.path.join(bids_dir, subj, ses, "mrs")
-        if not os.path.isdir(mrs_dir):
-            print(f"  [sum] {subj}: mrs/ folder not found, skipping.")
-            continue
-
-        out_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSum_mrsi.nii.gz"
-        save_dir = out_dir if out_dir is not None else mrs_dir
-        os.makedirs(save_dir, exist_ok=True)
-        out_path = os.path.join(save_dir, out_name)
-
-        if os.path.exists(out_path) and not overwrite:
-            print(f"  [sum] {subj}: already exists  {out_name}")
-            saved[subj] = out_path
-            continue
-
-        # collect all individual metabolite maps 
-        maps = sorted(
-            f for f in os.listdir(mrs_dir)
-            if f.endswith(".nii.gz")
-            and "acq-OrigRes" in f
-            and "AllMetabSum" not in f
-        )
-        if not maps:
-            print(f"  [sum] {subj}: no OrigRes maps found, skipping.")
-            continue
-
-        # use first file as the affine/header reference
-        ref_img = nib.load(os.path.join(mrs_dir, maps[0]))
-        accum   = np.zeros(ref_img.shape, dtype=np.float32)
-
-        n_used = 0
-        for fname in maps:
-            data = nib.load(os.path.join(mrs_dir, fname)).get_fdata().astype(np.float32)
-            accum += np.nan_to_num(data, nan=0.0)
-            n_used += 1
-
-        sum_img = nib.Nifti1Image(accum, ref_img.affine, ref_img.header)
-        sum_img.set_data_dtype(np.float32)
-        nib.save(sum_img, out_path)
-        print(f"  [sum] {subj}: saved {out_name}  ({n_used} maps summed)")
-        saved[subj] = out_path
-
-    return saved
-
-def save_reoriented_metabolite_sum(
-    bids_dir: str,
-    ses: str = "ses-01",
-    overwrite: bool = False,
-    out_dir: str | None = None):
-    
-    saved = {}
-
-    for subj in sorted(os.listdir(bids_dir)):
-        if not subj.startswith("sub-"):
-            continue
-
-        mrs_dir = os.path.join(bids_dir, subj, ses, "mrs")
-        if not os.path.isdir(mrs_dir):
-            print(f"  [sum-ras] {subj}: mrs/ folder not found, skipping.")
-            continue
-
-        out_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
-        save_dir = out_dir if out_dir is not None else mrs_dir
-        os.makedirs(save_dir, exist_ok=True)
-        out_path = os.path.join(save_dir, out_name)
-
-        if os.path.exists(out_path) and not overwrite:
-            print(f"  [sum-ras] {subj}: already exists  {out_name}")
-            saved[subj] = out_path
-            continue
-
-        maps = sorted(
-            f for f in os.listdir(mrs_dir)
-            if f.endswith(".nii.gz")
-            and "acq-OrigRes" in f
-            and "AllMetab" not in f
-        )
-        if not maps:
-            print(f"  [sum-ras] {subj}: no OrigRes maps found, skipping.")
-            continue
-
-        ref_img = _fsl_reorient2std(os.path.join(mrs_dir, maps[0]))
-        accum   = np.zeros(ref_img.shape, dtype=np.float32)
-
-        n_used = 0
-        for fname in maps:
-            img  = _fsl_reorient2std(os.path.join(mrs_dir, fname))
-            data = img.get_fdata().astype(np.float32)
-            if data.shape != accum.shape:
-                print(f"  [sum-ras] {subj}: shape mismatch in {fname}, skipping.")
-                continue
-            accum += np.nan_to_num(data, nan=0.0)
-            n_used += 1
-
-        sum_img = nib.Nifti1Image(accum, ref_img.affine, ref_img.header)
-        sum_img.set_data_dtype(np.float32)
-        nib.save(sum_img, out_path)
-        print(f"  [sum-ras] {subj}: saved {out_name}  ({n_used} maps reoriented and summed)")
-        saved[subj] = out_path
-
-    return saved
-
-def downsample_t1w_to_mrs(
-    bids_dir: str,
-    ses: str = "ses-01",
-    t1w_acq: str = "UNIDEN",
-    overwrite: bool = False,
-    out_dir: str | None = None):
-    
-    saved = {}
-
-    for subj in sorted(os.listdir(bids_dir)):
-        if not subj.startswith("sub-"):
-            continue
-
-        anat_dir = os.path.join(bids_dir, subj, ses, "anat")
-        mrs_dir  = os.path.join(bids_dir, subj, ses, "mrs")
-
-        if not os.path.isdir(anat_dir):
-            continue
-        if not os.path.isdir(mrs_dir):
-            print(f"  [t1w-ds] {subj}: no mrs/ folder, skipping.")
-            continue
-
-        out_name = f"{subj}_{ses}_acq-MRSIres_T1w.nii.gz"
-        save_dir = out_dir if out_dir is not None else anat_dir
-        os.makedirs(save_dir, exist_ok=True)
-        out_path = os.path.join(save_dir, out_name)
-
-        if os.path.exists(out_path) and not overwrite:
-            print(f"  [t1w-ds] {subj}: already exists  {out_name}")
-            saved[subj] = out_path
-            continue
-
-        # locate the T1w source
-        t1w_name = f"{subj}_{ses}_acq-{t1w_acq}_T1w.nii"
-        t1w_path = os.path.join(anat_dir, t1w_name)
-        if not os.path.exists(t1w_path):
-                print(f"  [t1w-ds] {subj}: T1w not found ({t1w_name}), skipping.")
-                continue
-
-        # pick the first OrigRes MRSI map as the target grid
-        mrs_maps = sorted(
-            f for f in os.listdir(mrs_dir)
-            if f.endswith(".nii.gz") and "acq-OrigRes" in f and "AllMetabSum" not in f
-        )
-        if not mrs_maps:
-            print(f"  [t1w-ds] {subj}: no OrigRes MRSI maps found, skipping.")
-            continue
-
-        mrs_ref_img = nib.load(os.path.join(mrs_dir, mrs_maps[0]))
-        t1w_img     = nib.load(t1w_path)
-
-        # resample T1w to MRSI grid (order=1: linear interpolation)
-        t1w_ds = resample_from_to(t1w_img, mrs_ref_img, order=1)
-        t1w_ds = nib.Nifti1Image(
-            np.array(t1w_ds.dataobj, dtype=np.float32),
-            t1w_ds.affine,
-            t1w_ds.header,
-        )
-        t1w_ds.set_data_dtype(np.float32)
-        nib.save(t1w_ds, out_path)
-        print(
-            f"  [t1w-ds] {subj}: saved {out_name}  "
-            f"(T1w {t1w_img.shape} to MRS grid {mrs_ref_img.shape})"
-        )
-        saved[subj] = out_path
-
-    return saved
-
-
-def skull_strip_t1w(
-    in_path: str,
-    out_path: str,
-    frac: float = 0.5,
-    overwrite: bool = False):
-
-    if os.path.exists(out_path) and not overwrite:
-        print(f"  [bet] already exists: {out_path}")
-        return nib.load(out_path)
-
-    cmd = ["bet", in_path, out_path, "-f", str(frac), "-g", "0", "-m"]
-    print(f"  [bet] running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    print(f"  [bet] saved: {out_path}")
-    return nib.load(out_path)
-
-
-def segment_t1w(
-    brain_path: str,
-    out_prefix: str,
-    n_classes: int = 3,
-    overwrite: bool = False,
-) -> dict:
-    """Segment a skull-stripped T1w image into CSF / GM / WM using FSL FAST.
-
-    Parameters
-    ----------
-    brain_path : str
-        Path to the skull-stripped T1w NIfTI (e.g. output of skull_strip_t1w).
-    out_prefix : str
-        Base path for FAST output files (no extension).
-        FAST writes e.g. ``<out_prefix>_pve_0.nii.gz`` (CSF),
-        ``_pve_1.nii.gz`` (GM), ``_pve_2.nii.gz`` (WM),
-        ``_seg.nii.gz`` (hard segmentation).
-    n_classes : int
-        Number of tissue classes (default 3: CSF/GM/WM).
-    overwrite : bool
-        Re-run FAST even if outputs already exist.
-
-    Returns
-    -------
-    dict with keys ``csf``, ``gm``, ``wm``, ``seg`` — each a loaded
-    ``nib.Nifti1Image``, or ``None`` if that file is missing.
-    """
-    seg_path = f"{out_prefix}_seg.nii.gz"
-    pve0     = f"{out_prefix}_pve_0.nii.gz"
-
-    if os.path.exists(seg_path) and os.path.exists(pve0) and not overwrite:
-        print(f"  [fast] already exists: {os.path.basename(seg_path)}")
-    else:
-        cmd = [
-            "fast",
-            "-n", str(n_classes),
-            "-t", "1",          # T1-weighted
-            "-o", out_prefix,
-            brain_path,
-        ]
-        print(f"  [fast] running: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True, capture_output=True)
-        print(f"  [fast] done → {out_prefix}_pve_{{0,1,2}}.nii.gz")
-
-    def _load(path):
-        return nib.load(path) if os.path.exists(path) else None
-
-    return {
-        "csf": _load(f"{out_prefix}_pve_0.nii.gz"),
-        "gm":  _load(f"{out_prefix}_pve_1.nii.gz"),
-        "wm":  _load(f"{out_prefix}_pve_2.nii.gz"),
-        "seg": _load(f"{out_prefix}_seg.nii.gz"),
-    }
-
-
-def segment_t1w_atlas(
-    brain_path: str,
-    out_prefix: str,
-    nonlinear: bool = False,
-    overwrite: bool = False,
-) -> dict:
-    """Register a skull-stripped T1w to MNI152 and backproject Harvard-Oxford atlas labels.
-
-    Uses FLIRT (12 DOF affine, normmi cost) to register the brain image to the
-    MNI152 2mm template, inverts the transform with ``convert_xfm``, then
-    applies the inverse to the Harvard-Oxford cortical and subcortical max-prob
-    atlases (25% probability threshold, 2 mm resolution), bringing both
-    parcellations into native T1w space.
-
-    If ``nonlinear=True`` a subsequent FNIRT warp is estimated and inverted with
-    ``invwarp``/``applywarp`` for improved accuracy.
-
-    Parameters
-    ----------
-    brain_path : str
-        Path to the skull-stripped T1w NIfTI (output of :func:`skull_strip_t1w`).
-    out_prefix : str
-        Base path for output files.  Results are written as
-        ``<out_prefix>_atlas_cort.nii.gz``, ``_atlas_sub.nii.gz``,
-        ``_T1w_in_MNI.nii.gz``, ``_t1w2mni.mat``.
-    nonlinear : bool
-        If ``True``, run FNIRT after FLIRT for a nonlinear warp. Default False.
-    overwrite : bool
-        Re-run registration even if outputs already exist.
-
-    Returns
-    -------
-    dict with keys:
-        ``atlas_cort``  — Harvard-Oxford cortical labels in native T1w space.
-        ``atlas_sub``   — Harvard-Oxford subcortical labels in native T1w space.
-        ``t1w_in_mni``  — T1w registered to MNI152 (QC image).
-        ``labels_cort`` — list[str] of region names, index = label value.
-        ``labels_sub``  — same for subcortical atlas.
-    """
-    import xml.etree.ElementTree as ET
-
-    fsldir    = os.environ.get("FSLDIR", "/usr/local/fsl")
-    mni_brain = os.path.join(fsldir, "data", "standard", "MNI152_T1_2mm_brain.nii.gz")
-    mni_head  = os.path.join(fsldir, "data", "standard", "MNI152_T1_2mm.nii.gz")
-    atlas_cort_mni = os.path.join(fsldir, "data", "atlases", "HarvardOxford",
-                                  "HarvardOxford-cort-maxprob-thr25-2mm.nii.gz")
-    atlas_sub_mni  = os.path.join(fsldir, "data", "atlases", "HarvardOxford",
-                                  "HarvardOxford-sub-maxprob-thr25-2mm.nii.gz")
-    xml_cort = os.path.join(fsldir, "data", "atlases", "HarvardOxford-Cortical.xml")
-    xml_sub  = os.path.join(fsldir, "data", "atlases", "HarvardOxford-Subcortical.xml")
-
-    out_cort    = f"{out_prefix}_atlas_cort.nii.gz"
-    out_sub     = f"{out_prefix}_atlas_sub.nii.gz"
-    out_t1w_mni = f"{out_prefix}_T1w_in_MNI.nii.gz"
-    out_xfm     = f"{out_prefix}_t1w2mni.mat"
-    out_inv_xfm = f"{out_prefix}_mni2t1w.mat"
-
-    if (os.path.exists(out_cort) and os.path.exists(out_sub)
-            and os.path.exists(out_t1w_mni) and not overwrite):
-        print(f"  [atlas] already exists: {os.path.basename(out_cort)}")
-    else:
-        print("  [atlas] FLIRT: registering T1w to MNI152 (12 DOF, normmi)…")
-        subprocess.run([
-            "flirt",
-            "-in",     brain_path,
-            "-ref",    mni_brain,
-            "-out",    out_t1w_mni,
-            "-omat",   out_xfm,
-            "-dof",    "12",
-            "-cost",   "normmi",
-            "-interp", "spline",
-        ], check=True, capture_output=True)
-
-        if nonlinear:
-            out_warp     = f"{out_prefix}_t1w2mni_warp.nii.gz"
-            out_inv_warp = f"{out_prefix}_mni2t1w_warp.nii.gz"
-            print("  [atlas] FNIRT: nonlinear warp to MNI152…")
-            subprocess.run([
-                "fnirt",
-                f"--in={brain_path}",
-                f"--aff={out_xfm}",
-                f"--cout={out_warp}",
-                f"--ref={mni_head}",
-                "--config=T1_2_MNI152_2mm",
-            ], check=True, capture_output=True)
-            print("  [atlas] invwarp: inverting nonlinear warp…")
-            subprocess.run([
-                "invwarp",
-                f"-w={out_warp}",
-                f"-o={out_inv_warp}",
-                f"-r={brain_path}",
-            ], check=True, capture_output=True)
-            for atlas_in, atlas_out in [
-                (atlas_cort_mni, out_cort),
-                (atlas_sub_mni,  out_sub),
-            ]:
-                subprocess.run([
-                    "applywarp",
-                    f"-i={atlas_in}",
-                    f"-r={brain_path}",
-                    f"-w={out_inv_warp}",
-                    f"-o={atlas_out}",
-                    "--interp=nn",
-                ], check=True, capture_output=True)
-        else:
-            subprocess.run([
-                "convert_xfm",
-                "-omat",    out_inv_xfm,
-                "-inverse", out_xfm,
-            ], check=True, capture_output=True)
-            for atlas_in, atlas_out in [
-                (atlas_cort_mni, out_cort),
-                (atlas_sub_mni,  out_sub),
-            ]:
-                subprocess.run([
-                    "flirt",
-                    "-in",    atlas_in,
-                    "-ref",   brain_path,
-                    "-out",   atlas_out,
-                    "-init",  out_inv_xfm,
-                    "-applyxfm",
-                    "-interp", "nearestneighbour",
-                ], check=True, capture_output=True)
-
-        print(f"  [atlas] done → {os.path.basename(out_cort)}, {os.path.basename(out_sub)}")
-
-    def _parse_labels(xml_path):
-        """Return list[str] indexed from 0 (background) through N (last region)."""
-        labels = ["Background"]
-        try:
-            tree = ET.parse(xml_path)
-            for el in sorted(tree.iter("label"), key=lambda e: int(e.get("index", 0))):
-                labels.append(el.text.strip() if el.text else f"Region {el.get('index')}")
-        except Exception:
-            pass
-        return labels
-
-    def _load(p):
-        return nib.load(p) if os.path.exists(p) else None
-
-    return {
-        "atlas_cort":  _load(out_cort),
-        "atlas_sub":   _load(out_sub),
-        "t1w_in_mni":  _load(out_t1w_mni),
-        "labels_cort": _parse_labels(xml_cort),
-        "labels_sub":  _parse_labels(xml_sub),
-    }
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Registration utilities
-# ──────────────────────────────────────────────────────────────────────────
-
-def register_mrsi_to_t1w(
-    mrsi_img: nib.Nifti1Image,
-    t1w_img: nib.Nifti1Image,
-    mask: np.ndarray,
-    out_path: str | None = None,
-    overwrite: bool = False,
-    init_transforms: list | None = None):
-
-    # Sidecar file that persists the forward transform next to the NIfTI
-    transform_sidecar = (
-        out_path.replace(".nii.gz", "_fwdtransform.mat") if out_path else None
-    )
-
-    if out_path and os.path.exists(out_path) and not overwrite:
-        print(f"  [reg] already exists: {out_path}")
-        saved_t = (
-            [transform_sidecar]
-            if transform_sidecar and os.path.exists(transform_sidecar)
-            else None
-        )
-        return nib.load(out_path), saved_t
-
-    mrsi_data   = mrsi_img.get_fdata().astype(np.float32)
-    mrsi_masked = np.where(mask, mrsi_data, 0.0)
-    t1w_data    = t1w_img.get_fdata().astype(np.float32)
-
-    fixed_ants  = _nib_to_ants(t1w_data, t1w_img)
-    moving_ants = _nib_to_ants(mrsi_masked, mrsi_img)
-
-    if init_transforms is not None:
-        fwd_transforms = init_transforms
-        print(f"  [reg] applying pre-computed transforms (skipping optimisation)")
-    else:
-        result = ants.registration(
-            fixed=fixed_ants,
-            moving=moving_ants,
-            type_of_transform="Rigid",
-            verbose=False,
-        )
-        fwd_transforms = result["fwdtransforms"]
-
-    if transform_sidecar and fwd_transforms:
-        src = os.path.abspath(fwd_transforms[0])
-        dst = os.path.abspath(transform_sidecar)
-        if src != dst:
-            shutil.copy(src, dst)
-        used_transforms = [transform_sidecar]
-    else:
-        used_transforms = fwd_transforms
-
-    # Apply transform to the  MRSI 
-    warped_ants = ants.apply_transforms(
-        fixed=fixed_ants,
-        moving=_nib_to_ants(mrsi_data, mrsi_img),
-        transformlist=fwd_transforms,
-        interpolator="linear")
-
-    # Warp the mask into T1w space so we can zero out voxels 
-    warped_mask_ants = ants.apply_transforms(
-        fixed=fixed_ants,
-        moving=_nib_to_ants(mask.astype(np.float32), mrsi_img),
-        transformlist=fwd_transforms,
-        interpolator="nearestNeighbor")
-    brain_mask_t1w = warped_mask_ants.numpy() > 0.5
-
-    reg_data = warped_ants.numpy().astype(np.float32)
-    reg_data[~brain_mask_t1w] = 0.0
-
-    reg_img = nib.Nifti1Image(reg_data, t1w_img.affine, t1w_img.header)
-    reg_img.set_data_dtype(np.float32)
-
-    if out_path:
-        nib.save(reg_img, out_path)
-        print(f"  [reg] saved registered MRSI: {out_path}")
-
-    return reg_img, used_transforms
-
-def register_t1w_to_mrsi(
-    t1w_img: nib.Nifti1Image,
-    mrsi_img: nib.Nifti1Image,
-    out_path: str | None = None,
-    overwrite: bool = False,
-    init_transforms: list | None = None):
-
-    transform_sidecar = (
-        out_path.replace(".nii.gz", "_fwdtransform.mat") if out_path else None
-    )
-
-    if out_path and os.path.exists(out_path) and not overwrite:
-        print(f"  [inv-reg] already exists: {out_path}")
-        saved_t = (
-            [transform_sidecar]
-            if transform_sidecar and os.path.exists(transform_sidecar)
-            else None
-        )
-        return nib.load(out_path), saved_t
-
-    t1w_data  = t1w_img.get_fdata().astype(np.float32)
-    mrsi_data = mrsi_img.get_fdata().astype(np.float32)
-
-    fixed_ants  = _nib_to_ants(mrsi_data, mrsi_img)
-    moving_ants = _nib_to_ants(t1w_data,  t1w_img)
-
-    if init_transforms is not None:
-        fwd_transforms = init_transforms
-        print("  [inv-reg] applying pre-computed transforms (skipping optimisation)")
-    else:
-        result = ants.registration(
-            fixed=fixed_ants,
-            moving=moving_ants,
-            type_of_transform="Rigid",
-            verbose=False,
-        )
-        fwd_transforms = result["fwdtransforms"]
-
-    if transform_sidecar and fwd_transforms:
-        src = os.path.abspath(fwd_transforms[0])
-        dst = os.path.abspath(transform_sidecar)
-        if src != dst:
-            shutil.copy(src, dst)
-        used_transforms = [transform_sidecar]
-    else:
-        used_transforms = fwd_transforms
-
-    warped_ants = ants.apply_transforms(
-        fixed=fixed_ants,
-        moving=moving_ants,
-        transformlist=fwd_transforms,
-        interpolator="linear",
-    )
-
-    reg_data = warped_ants.numpy().astype(np.float32)
-    reg_img  = nib.Nifti1Image(reg_data, mrsi_img.affine, mrsi_img.header)
-    reg_img.set_data_dtype(np.float32)
-
-    if out_path:
-        nib.save(reg_img, out_path)
-        print(f"  [inv-reg] saved T1w in MRSI space: {out_path}")
-
-    return reg_img, used_transforms
-
-def register_t1w_to_mrsi_weighted(
-    fixed_path: str,
-    moving_path: str,
-    mask_path: str,
-    out_path: str,
-    transform_path: str,
-    overwrite: bool = False,
-    init_transforms: list | None = None,
-    moving_mask_path: str | None = None,
-    init_from_path: str | None = None):
-
-    if os.path.exists(out_path) and not overwrite:
-        print(f"[weighted-reg] already exists: {out_path}")
-        transforms = [transform_path] if os.path.exists(transform_path) else None
-        return nib.load(out_path), transforms
-
-    if init_transforms is not None:
-        cmd = [
-            "antsApplyTransforms",
-            "--dimensionality", "3",
-            "--input", moving_path,
-            "--reference-image", fixed_path,
-            "--output", out_path,
-            "--interpolation", "Linear",
-        ]
-        for t in init_transforms:
-            cmd.extend(["--transform", t])
-
-        print("[weighted-reg] applying pre-computed transforms...")
-        subprocess.run(cmd, check=True)
-        reg_img = nib.load(out_path)
-        print(f"[weighted-reg] saved image: {out_path}")
-        return reg_img, init_transforms
-
-    out_prefix = out_path.replace(".nii.gz", "_ants_")
-
-    cmd = [
-        "antsRegistration",
-        "--dimensionality", "3",
-        "--float", "1",
-        "--output", f"[{out_prefix},{out_prefix}Warped.nii.gz]",
-        "--interpolation", "Linear",
-        # ANTs does not accept "NULL" as a placeholder — omit the second
-        # entry entirely when no moving-image mask is available.
-        "--masks", "[{},{}]".format(mask_path, moving_mask_path) if moving_mask_path else "[{}]".format(mask_path),
-        # Seed from a pre-computed transform when provided (avoids CoM
-        # instability for skull-stripped images whose CoM differs from
-        # the MRSI signal CoM), otherwise fall back to CoM alignment.
-        "--initial-moving-transform",
-            init_from_path if init_from_path else f"[{fixed_path},{moving_path},1]",
-
-        "--transform", "Rigid[0.1]",
-        # Mattes MI is voxel-wise (no neighborhood) so it works correctly
-        # at MRSI resolution (~10 mm voxels, ~9 brain voxels total) where
-        # CC always fails with "No valid points".  32 histogram bins is
-        # standard for same-modality; 80% random sampling balances speed/accuracy.
-        "--metric", f"Mattes[{fixed_path},{moving_path},1,32,Random,0.8]",
-        "--convergence", "[1000x500,1e-6,10]",
-        "--shrink-factors", "2x1",
-        "--smoothing-sigmas", "1x0vox",
-    ]
-
-    print("[weighted-reg] running antsRegistration...")
-    subprocess.run(cmd, check=True)
-
-    warped_path = f"{out_prefix}Warped.nii.gz"
-    affine_path = f"{out_prefix}0GenericAffine.mat"
-
-    shutil.move(warped_path, out_path)
-    shutil.move(affine_path, transform_path)
-
-    reg_img = nib.load(out_path)
-    print(f"[weighted-reg] saved image: {out_path}")
-
-    return reg_img, [transform_path]
-
-def apply_transform_to_metabolite(
-    mrsi_path: str,
-    transform_path: str,
-    t1w_ref_path: str,
-    out_path: str,
-    overwrite: bool = False): 
-
-    if os.path.exists(out_path) and not overwrite:
-        print(f"  [reg17] already exists: {out_path}")
-        return nib.load(out_path)
-
-    out_dir = os.path.dirname(out_path)
-    os.makedirs(out_dir, exist_ok=True)
-    label   = metabolite_name(mrsi_path)
-    ras_tmp = os.path.join(out_dir, f"_tmp_{label}_ras.nii.gz")
-    nib.save(nib.as_closest_canonical(nib.load(mrsi_path)), ras_tmp)
-
-    cmd = [
-        "antsApplyTransforms", "-d", "3",
-        "-i", ras_tmp,
-        "-r", t1w_ref_path,
-        "-t", f"[{transform_path},1]",  
-        "-n", "Linear",
-        "-o", out_path,
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        print(f"  [reg17] {label}: saved to {os.path.basename(out_path)}")
-        return nib.load(out_path)
-    except subprocess.CalledProcessError as e:
-        print(f"  [reg17] {label}: FAILED\n{e.stderr.decode()}")
-        return None
-    finally:
-        if os.path.exists(ras_tmp):
-            os.remove(ras_tmp)
-
-def apply_transform_all_metabolites(
-    mrs_dir: str,
-    transform_path: str,
-    t1w_ref_path: str,
-    out_dir: str,
-    subj: str = "sub-01",
-    ses: str = "ses-01",
-    overwrite: bool = False):
-   
-    maps = sorted(
-        f for f in os.listdir(mrs_dir)
-        if f.endswith(".nii.gz") and "acq-OrigRes" in f and "AllMetab" not in f
-    )
-    os.makedirs(out_dir, exist_ok=True)
-    results = {}
-
-    for fname in maps:
-        label    = metabolite_name(fname)
-        out_name = f"{subj}_{ses}_acq-MRSIres_desc-{label}Reg17_T1w.nii.gz"
-        img = apply_transform_to_metabolite(
-            mrsi_path=os.path.join(mrs_dir, fname),
-            transform_path=transform_path,
-            t1w_ref_path=t1w_ref_path,
-            out_path=os.path.join(out_dir, out_name),
-            overwrite=overwrite,
-        )
-        if img is not None:
-            results[label] = img
-
-    return results
-
-def compute_registration_metrics(
-    t1w_img: nib.Nifti1Image,
-    reg_mrsi_imgs: dict):
-    
-    t1w_data   = t1w_img.get_fdata().astype(np.float32)
-    brain_mask = t1w_data > 0
-    n_brain    = int(brain_mask.sum())
-
-    records = []
-    for label, img in reg_mrsi_imgs.items():
-        mrsi_data   = img.get_fdata().astype(np.float32)
-        signal_mask = mrsi_data > 0
-        overlap     = brain_mask & signal_mask
-        coverage    = float(overlap.sum()) / n_brain if n_brain > 0 else 0.0
-
-        if overlap.sum() > 20:
-            t1w_vals  = t1w_data[overlap]
-            mrsi_vals = mrsi_data[overlap]
-            # NCC
-            t1w_c = t1w_vals  - t1w_vals.mean()
-            mrs_c = mrsi_vals - mrsi_vals.mean()
-            denom = np.sqrt((t1w_c ** 2).sum() * (mrs_c ** 2).sum())
-            ncc   = float((t1w_c * mrs_c).sum() / (denom + 1e-10))
-            # NMI
-            nmi = _mutual_information(t1w_vals, mrsi_vals)
-        else:
-            ncc = 0.0
-            nmi = 0.0
-
-        records.append({"label": label, "coverage": coverage, "ncc": ncc, "nmi": nmi})
-
-    # Sort by |NCC| descending: strongest correlation magnitude = best structural
-    # coherence with T1w, regardless of sign (anti-correlation is expected here).
-    records.sort(key=lambda r: abs(r["ncc"]), reverse=True)
-    return records
-
-def run_total_pipeline(
-    bids_dir: str,
-    mrs_dir: str,
-    water_path: str,
-    t1w_ds_brain_path: str,
-    t1w_ds_brain_img: "nib.Nifti1Image",
-    subj: str,
-    ses: str,
-    output_dir: str,
-    overwrite: bool = False,
-    t1w_brain_mask_ds_path: str | None = None):
-
-    # Step 1 – reorient metabolite sum
-    sum_ras_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
-    sum_ras_path = os.path.join(output_dir, sum_ras_name)
-    save_reoriented_metabolite_sum(bids_dir, ses=ses, out_dir=output_dir, overwrite=overwrite)
-    sum_ras_img = nib.load(sum_ras_path) if os.path.exists(sum_ras_path) else None
-
-    # Step 2 – RAS canonical reoriented water signal
-    water_ras_name = f"{subj}_{ses}_desc-WaterSignalRAS_mrsi.nii.gz"
-    water_ras_path = os.path.join(output_dir, water_ras_name)
-    if overwrite or not os.path.exists(water_ras_path):
-        water_ras_img = _fsl_reorient2std(water_path)
-        nib.save(water_ras_img, water_ras_path)
-        print(f"  [ras] saved reoriented water: {water_ras_name}")
-    # Binary mask of the RAS water signal — ANTs --masks expects 0/1 values,
-    # not the raw continuous water signal intensity.
-    water_ras_mask_name = f"{subj}_{ses}_desc-WaterSignalRASMask_mrsi.nii.gz"
-    water_ras_mask_path = os.path.join(output_dir, water_ras_mask_name)
-    fill_mask_holes(water_ras_path, out_mask_path=water_ras_mask_path, overwrite=overwrite)
-
-    # Step 3  Reg-17: skull stripped DS T1w to reoriented sum, water-masked
-    t1w_brain_in_sum_ras_name = f"{subj}_{ses}_acq-MRSIres_desc-BrainT1wInSumRAS_T1w.nii.gz"
-    t1w_brain_in_sum_ras_path = os.path.join(output_dir, t1w_brain_in_sum_ras_name)
-    t1w_brain_in_sum_ras_xfm  = t1w_brain_in_sum_ras_path.replace(".nii.gz", "_fwdtransform.mat")
-    if sum_ras_img is not None:
-        t1w_brain_in_sum_ras_img, brain_sum_ras_transforms = register_t1w_to_mrsi_weighted(
-            fixed_path=sum_ras_path,
-            moving_path=t1w_ds_brain_path,
-            mask_path=water_ras_mask_path,
-            out_path=t1w_brain_in_sum_ras_path,
-            transform_path=t1w_brain_in_sum_ras_xfm,
-            overwrite=overwrite,
-            moving_mask_path=t1w_brain_mask_ds_path,
-        )
-    else:
-        t1w_brain_in_sum_ras_img, brain_sum_ras_transforms = None, None
-
-    # Step 4  Apply Reg-17 transform to every individual metabolite map
-    final_reg_dir = os.path.join(output_dir, "final_reg")
-    if brain_sum_ras_transforms is not None:
-        final_reg_imgs = apply_transform_all_metabolites(
-            mrs_dir=mrs_dir,
-            transform_path=brain_sum_ras_transforms[0],
-            t1w_ref_path=t1w_ds_brain_path,
-            out_dir=final_reg_dir,
-            subj=subj,
-            ses=ses,
-            overwrite=overwrite,
-        )
-    else:
-        final_reg_imgs = {}
-        print("  [pipeline] Step 4 skipped – Reg-17 transform not available.")
-
-    # Step 5  Per-metabolite quality metrics in T1w space
-    if final_reg_imgs:
-        metrics = compute_registration_metrics(t1w_ds_brain_img, final_reg_imgs)
-        print("\nRegistration quality metrics (Reg-17 total pipeline):")
-        for r in metrics:
-            print(f"  {r['label']:<28}  coverage={r['coverage']:.3f}"
-                  f"  NCC={r['ncc']:+.4f}  NMI={r['nmi']:.4f}")
-    else:
-        metrics = []
-
-    return t1w_brain_in_sum_ras_img, brain_sum_ras_transforms, final_reg_imgs, metrics
-
-
-
-# ──────────────────────────────────────────────────────────────────────────
 # Plot utilities
-# ──────────────────────────────────────────────────────────────────────────
+
 
 def plot_single_overlay(
     mrs_filename: str,
@@ -1215,9 +232,6 @@ def plot_t1w_mrs_comparison(
     fig, axes = plt.subplots(3, 3, figsize=(13, 11), facecolor="black")
     row_labels = [f"T1w @ MRS res", mrs_label, "Overlay"]
 
-    cmap_t1  = plt.get_cmap(t1w_cmap)
-    cmap_mrs = plt.get_cmap(mrs_cmap)
-
     for col, (t1s, ms, vl) in enumerate(zip(t1_slices, mrs_slices, view_labels)):
         # Row 0 – T1w
         axes[0, col].imshow(t1s.T, origin="lower", cmap=t1w_cmap,
@@ -1322,16 +336,8 @@ def plot_registration_methods_comparison(
     ses: str = "ses-01",
     mrsi_label: str = "MRSI",
     t1w_cmap: str = "gray",
-    mrs_cmap: str = "hot",
-) -> None:
-    """
-    Side-by-side comparison of two registration strategies.
-
-    Left column : MRSI registered to the downsampled T1w (DS T1w as fixed).
-    Right column: MRSI registered to the full-resolution T1w (full T1w as fixed).
-
-    Each column shows the registered MRSI overlaid on its respective T1w background.
-    """
+    mrs_cmap: str = "hot"):
+    
     def _norm(data: np.ndarray) -> np.ndarray:
         pos = data[data > 0]
         if pos.size == 0:
@@ -1391,16 +397,8 @@ def plot_registration_target_comparison(
     bestsnr_label: str = "best-SNR metabolite",
     sum_label: str = "Metabolite sum",
     t1w_cmap: str = "gray",
-    mrs_cmap: str = "hot",
-) -> None:
-    """
-    Compare two MRSI registrations, both displayed in DS T1w space.
-
-    Left column : first registration overlaid on DS T1w.
-    Right column: second registration overlaid on DS T1w.
-
-    Both are overlaid on the DS T1w background for direct comparison.
-    """
+    mrs_cmap: str = "hot"):
+  
     def _norm(data: np.ndarray) -> np.ndarray:
         pos = data[data > 0]
         if pos.size == 0:
@@ -1462,19 +460,8 @@ def plot_coverage_registration_comparison(
     cov_label: str = "Best-coverage",
     gly_label: str = "Gly",
     t1w_cmap: str = "gray",
-    mrs_cmap: str = "hot",
-) -> None:
-    """
-    Three-column registration comparison in DS T1w space, plus a metrics table.
-
-    Left   – best-coverage metabolite (e.g. Ins) with its own rigid transform.
-    Centre – Gly (best-SNR) with its own rigid transform (the reference).
-    Right  – Gly with the metabolite-sum's transform applied (no re-optimisation).
-
-    Each column shows axial / coronal / sagittal views overlaid on the DS T1w.
-    Below the figure a metrics table prints CC with T1w and mean in-brain
-    intensity for each of the three registrations.
-    """
+    mrs_cmap: str = "hot"):
+   
     def _norm(data: np.ndarray) -> np.ndarray:
         pos = data[data > 0]
         if pos.size == 0:
@@ -1560,8 +547,6 @@ def compare_registration_coverage(
     d_sum     = _norm(mrsi_reg_sum_img.get_fdata().astype(np.float32))
     diff      = d_bestsnr - d_sum   # positive = more MRSI signal in best-SNR reg
 
-    # Warp the MRSI-space mask into T1w space using the ANTs transforms so
-    # the contour follows the actual registration, not just the raw affine.
     t1w_data    = t1w_ds_img.get_fdata().astype(np.float32)
     fixed_ants  = _nib_to_ants(t1w_data, t1w_ds_img)
     mask_f32    = mrsi_mask.astype(np.float32)
@@ -1579,7 +564,6 @@ def compare_registration_coverage(
     mask_bestsnr = _warp_mask(bestsnr_transforms)
     mask_sum     = _warp_mask(sum_transforms)
 
-    # Metrics use the best-SNR warped mask (the reference registration)
     mask_bool = mask_bestsnr
     out_mask  = ~mask_bool
 
@@ -1709,25 +693,8 @@ def plot_sum_registration_comparison(
     ses: str = "ses-01",
     bestsnr_label: str = "best-SNR",
     t1w_cmap: str = "gray",
-    mrs_cmap: str = "hot",
-) -> None:
-    """
-    Impact of transform choice on the best-SNR (Gly) metabolite map.
+    mrs_cmap: str = "hot"):
 
-    Both columns show the **same** Gly image, but positioned differently:
-
-    Left  – Gly with its **own** rigid transform (Registration 1): the
-            optimizer had Gly as the moving image and found the best alignment
-            for it → this is the ground-truth reference.
-    Right – Gly with the **sum's** rigid transform (Registration 3): the
-            optimizer had the metabolite sum as the moving image; that
-            transform is then applied to Gly instead.
-
-    The difference between the two columns is entirely due to how well the
-    sum-optimized transform generalises to an individual metabolite map.
-    Any shift or rotation visible on the right but not the left means the
-    sum registration is introducing a systematic error for that metabolite.
-    """
     def _norm(data: np.ndarray) -> np.ndarray:
         pos = data[data > 0]
         if pos.size == 0:
@@ -1801,12 +768,8 @@ def plot_water_mask_comparison(
     water_img: nib.Nifti1Image,
     filled_mask: np.ndarray,
     subj: str = "sub-01",
-    ses: str = "ses-01",
-) -> None:
-    """
-    ortho comparison of the raw water mask, the hole filled mask,
-    and the recovered holes (voxels added by binary_fill_holes).
-    """
+    ses: str = "ses-01"):
+   
     water_data = water_img.get_fdata()
     _finite = water_data[np.isfinite(water_data) & (water_data > 0)]
     _thr    = float(np.percentile(_finite, 5)) if _finite.size > 0 else 0.0  # cut bottom 5%
@@ -1864,12 +827,8 @@ def plot_mrsi_mosaic(
     subj: str = "sub-01",
     cmap: str = "hot",
     alpha: float = 0.6,
-    cols: int = 3,
-) -> None:
-    """
-    Overlay multiple MRSI concentration maps in their own native space,
-    without any T1w background and without registration.
-    """
+    cols: int = 3):
+   
     n    = len(mrs_filenames)
     rows = (n + cols - 1) // cols
 
@@ -1992,12 +951,8 @@ def plot_mrsi_combined(
 
 def build_coverage_widget(
     mrs_dir: str,
-    subj: str = "sub-01",
-) -> widgets.Widget:
-    """
-    Interactive widget: select any combination of metabolites via checkboxes
-    and view their concentration maps overlaid in native MRS space.
-    """
+    subj: str = "sub-01"):
+   
     _PALETTE = [
         "Reds", "Blues", "Greens", "Oranges", "Purples",
         "YlOrBr", "PuRd", "BuGn", "RdPu", "GnBu",
@@ -2221,8 +1176,7 @@ def compare_inverse_registration_pair(
     label_left: str = "No mask",
     label_right: str = "Water weighted",
     t1w_cmap: str = "gray",
-    mrs_cmap: str = "hot",
-) -> None:
+    mrs_cmap: str = "hot"):
     
     def _norm(data: np.ndarray) -> np.ndarray:
         pos = data[data > 0]
@@ -2277,20 +1231,8 @@ def plot_total_pipeline_comparison(
     label_left: str = "Reg 15 – skull-stripped T1w\n→ original sum",
     label_right: str = "Reg 17 – skull-stripped T1w\n→ reoriented sum (total pipeline)",
     t1w_cmap: str = "gray",
-    mrs_cmap: str = "hot",
-) -> None:
-    """
-    Two-column comparison for the total pipeline visualisation (Section 19).
-
-    Each column is shown on its **own** native MRSI background so that the
-    two different voxel spaces (original sum vs reoriented RAS sum) are never
-    mixed.
-
-    - Left  : skull-stripped T1w registered to the original (non-reoriented)
-              metabolite sum, overlaid on that sum as background.
-    - Right : skull-stripped T1w registered to the reoriented RAS sum,
-              overlaid on the reoriented sum as background.
-    """
+    mrs_cmap: str = "hot"):
+ 
     def _norm(data: np.ndarray) -> np.ndarray:
         pos = data[data > 0]
         if pos.size == 0:
@@ -2344,14 +1286,8 @@ def plot_total_pipeline_comparison(
 def plot_registration_metrics(
     metrics: list,
     subj: str = "sub-01",
-    ses: str = "ses-01",
-) -> None:
-    """
-    Analytical multi-panel figure showing per-metabolite registration quality
-    after the Reg-17 total-pipeline transform.
-
-    Dot colour always encodes coverage (viridis: low=purple, high=yellow).
-    """
+    ses: str = "ses-01"):
+   
     if not isinstance(metrics, list) or not metrics:
         print("[metrics] no metrics to plot (expected non-empty list from "
               "compute_registration_metrics()).")
@@ -2418,9 +1354,6 @@ def plot_registration_metrics(
             spine.set_edgecolor(GREY)
         return sc
 
-    # panel 1: NCC ranked by |NCC| ascending so strongest anti-correlation is at top.
-    # Values are expected to be negative (T1w bright in WM, MRSI higher in GM).
-    # Top = most negative = largest |NCC| = best structural coherence.
     order_ncc = np.argsort(np.abs(ncc))
     sc1 = _lollipop(axes[0, 0], ncc, order_ncc,
                     "NCC  (negative = anti-correlated, expected for MRSI vs T1w UNI-DEN)",
@@ -2552,21 +1485,8 @@ def plot_segmentation(
     seg_imgs: dict,
     subj: str = "sub-01",
     ses: str = "ses-01",
-    alpha: float = 0.55,
-):
-    """Visualise FSL FAST tissue segmentation overlaid on the T1w image.
-
-    Parameters
-    ----------
-    t1w_img : nib.Nifti1Image
-        Background anatomical image (skull-stripped DS T1w recommended).
-    seg_imgs : dict
-        Output of ``segment_t1w`` — keys ``csf``, ``gm``, ``wm``, ``seg``.
-    subj, ses : str
-        Subject / session labels for the figure title.
-    alpha : float
-        Overlay transparency for the PVE maps.
-    """
+    alpha: float = 0.55):
+  
     BG   = "black"
     TXT  = "white"
 
@@ -2589,7 +1509,6 @@ def plot_segmentation(
 
     cut_coords = (0.0, 0.0, 0.0)
     try:
-        import nilearn.image as nlimg
         com = get_nonzero_com(t1w_img)
         cut_coords = com
     except Exception:
@@ -2603,19 +1522,7 @@ def plot_segmentation(
         if overlay is not None:
             data  = overlay.get_fdata()
             vmax  = float(np.nanpercentile(data[data > 0], 99)) if (data > 0).any() else 1.0
-            disp  = plotting.plot_stat_map(
-                stat_map_img=overlay,
-                bg_img=t1w_img,
-                display_mode="ortho",
-                cut_coords=cut_coords,
-                cmap=cmap,
-                colorbar=True,
-                threshold=0.05,
-                vmax=vmax,
-                title=f"{title} (PVE)",
-                axes=ax_top,
-                black_bg=True,
-            )
+        
         else:
             ax_top.set_facecolor(BG)
             ax_top.text(0.5, 0.5, f"{title}\nnot available",
@@ -2629,7 +1536,6 @@ def plot_segmentation(
     axes[1, 2].set_visible(False)
 
     if seg_img is not None:
-        seg_data = seg_img.get_fdata()
         # Encode CSF=1→blue, GM=2→red, WM=3→white in a single label image
         # FAST labels: 1=CSF, 2=GM, 3=WM
         plotting.plot_roi(
@@ -2671,25 +1577,9 @@ def plot_atlas_segmentation(
     t1w_img: nib.Nifti1Image,
     atlas_imgs: dict,
     subj: str = "sub-01",
-    ses: str = "ses-01",
-) -> None:
-    """Visualise Harvard-Oxford cortical and subcortical atlas labels on T1w.
-
-    Parameters
-    ----------
-    t1w_img : nib.Nifti1Image
-        Background anatomical image (skull-stripped DS T1w, same space as
-        atlas labels).
-    atlas_imgs : dict
-        Output of :func:`segment_t1w_atlas`.  Expected keys: ``atlas_cort``,
-        ``atlas_sub``, ``labels_cort``, ``labels_sub``.
-    subj, ses : str
-        Subject / session labels for figure titles.
-    """
-    from nilearn import plotting
+    ses: str = "ses-01"):
 
     BG  = "black"
-    TXT = "white"
 
     atlas_cort  = atlas_imgs.get("atlas_cort")
     atlas_sub   = atlas_imgs.get("atlas_sub")
@@ -2775,15 +1665,8 @@ def plot_mrsi_sum_mask_contours(
     bet_mask_img:   "nib.Nifti1Image | None",
     subj: str = "sub-01",
     ses:  str = "ses-01",
-    n_slices: int = 7,
-) -> None:
-    """Axial multi-slice panel: MRSI sum as greyscale background with three
-    contour overlays (all images must share the same voxel grid):
-
-    - Yellow : MRSI sum signal boundary (signal > 0)
-    - Blue   : water mask boundary
-    - Green  : BET brain mask boundary (omitted when *bet_mask_img* is None)
-    """
+    n_slices: int = 7):
+   
     sum_data   = sum_img.get_fdata().astype(np.float32)
     water_data = water_mask_img.get_fdata().astype(bool)
     bet_data   = bet_mask_img.get_fdata().astype(bool) if bet_mask_img is not None else None
@@ -2852,17 +1735,7 @@ def plot_bet_vs_water_mask(
     subj:            str = "sub-01",
     ses:             str = "ses-01",
     active_mask_name: str | None = None,
-    n_slices: int = 7,
-) -> None:
-    """Three-row axial mosaic comparing the BET brain mask and the water mask,
-    both on the MRSI voxel grid:
-
-    - Row 1 : BET mask (green overlay) on DS T1w background
-    - Row 2 : Water mask (blue overlay) on DS T1w background
-    - Row 3 : Comparison — BET-only (red), water-only (blue), overlap (grey)
-
-    Also prints a quantitative table (volumes, Dice, Jaccard).
-    """
+    n_slices: int = 7):
     bet_data   = bet_mask_img.get_fdata().astype(bool)
     water_data = water_mask_img.get_fdata().astype(bool)
     t1w_data   = t1w_ds_img.get_fdata().astype(np.float32)
@@ -2980,15 +1853,13 @@ def plot_bet_vs_water_mask(
     plt.show()
 
 
-# ──────────────────────────────────────────────────────────────────────────
 # Section 25 – Registration methodology comparison (NMI + visual thumbnails)
-# ──────────────────────────────────────────────────────────────────────────
+
 
 def _compute_nmi_vs_reference(
     reg_imgs: dict,
-    reference_img: nib.Nifti1Image,
-) -> list:
-    """NMI + coverage for each T1w-in-MRSI-space image against a reference."""
+    reference_img: nib.Nifti1Image):
+   
     ref_data = reference_img.get_fdata().astype(np.float32)
     ref_mask = ref_data > 0
     n_ref   = int(ref_mask.sum())
@@ -3014,19 +1885,8 @@ def plot_multi_reg_nmi_comparison(
     reg_imgs: dict,
     water_img: nib.Nifti1Image,
     subj: str = "sub-01",
-    ses: str = "ses-01",
-) -> None:
-    """Compare multiple T1w→MRSI registrations visually and via NMI.
-
-    Parameters
-    ----------
-    reg_imgs : dict
-        {label: nib.Nifti1Image} — each value is a T1w image already in
-        MRSI space (registered).  ``None`` values are skipped.
-    water_img : nib.Nifti1Image
-        Water signal map in MRSI space — used as reference both for the
-        NMI computation and as background/contour in the thumbnails.
-    """
+    ses: str = "ses-01"):
+  
     metrics = _compute_nmi_vs_reference(reg_imgs, water_img)
     if not metrics:
         print("[reg-nmi] nothing to plot — reg_imgs is empty or all None.")
@@ -3133,54 +1993,6 @@ def plot_multi_reg_nmi_comparison(
         print(f"{r['label']:<35}  {r['nmi']:>7.4f}  {r['coverage']:>9.3f}")
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Section 26 – Tissue-based metrics (FAST PVE fractions + GM/WM separation)
-# ──────────────────────────────────────────────────────────────────────────
-
-def compute_tissue_fractions_in_mrsi(
-    pve_gm_path: str,
-    pve_wm_path: str,
-    pve_csf_path: str,
-    mrsi_ref_path: str,
-    xfm_path: str,
-    out_dir: str,
-    subj: str = "sub-01",
-    ses: str = "ses-01",
-    overwrite: bool = False,
-) -> dict:
-    """Warp FAST PVE maps from T1w space into MRSI voxel space via ANTs.
-
-    Returns
-    -------
-    dict with keys ``gm``, ``wm``, ``csf`` — each a ``nib.Nifti1Image``
-    on the MRSI grid, or ``None`` if the source file is missing.
-    """
-    os.makedirs(out_dir, exist_ok=True)
-
-    def _warp(pve_path, tissue_label):
-        if not pve_path or not os.path.exists(pve_path):
-            return None
-        out_name = f"{subj}_{ses}_desc-{tissue_label}PVE_mrsi.nii.gz"
-        out_path = os.path.join(out_dir, out_name)
-        if os.path.exists(out_path) and not overwrite:
-            return nib.load(out_path)
-        cmd = [
-            "antsApplyTransforms", "-d", "3",
-            "-i", pve_path,
-            "-r", mrsi_ref_path,
-            "-t", xfm_path,
-            "-n", "Linear",
-            "-o", out_path,
-        ]
-        subprocess.run(cmd, check=True, capture_output=True)
-        print(f"  [tissue-pve] warped {tissue_label} → {out_name}")
-        return nib.load(out_path)
-
-    return {
-        "gm":  _warp(pve_gm_path,  "GM"),
-        "wm":  _warp(pve_wm_path,  "WM"),
-        "csf": _warp(pve_csf_path, "CSF"),
-    }
 
 
 def plot_tissue_metabolite_metrics(
@@ -3188,31 +2000,8 @@ def plot_tissue_metabolite_metrics(
     mrsi_conc_imgs: dict,
     water_img: nib.Nifti1Image,
     subj: str = "sub-01",
-    ses: str = "ses-01",
-) -> None:
-    """Tissue-based registration quality metrics.
-
-    Two panels:
-
-    **Row 0** — GM / WM / CSF partial-volume fraction maps overlaid on the
-    water signal map.  Each metabolite MRSI voxel is coloured by its tissue
-    composition.  Good registration → fraction maps look anatomically plausible.
-
-    **Row 1** — Biological plausibility scatter: for each metabolite the mean
-    concentration in predominantly-GM voxels (x-axis) vs predominantly-WM
-    voxels (y-axis).  The water signal is always shown as a reference.
-    Metabolites on the y=x diagonal show no tissue preference; those above
-    the line are WM-dominant (e.g. Cho, Cr) and below are GM-dominant
-    (e.g. Glu, Gln).
-
-    Parameters
-    ----------
-    tissue_fracs : dict  {gm, wm, csf} — PVE maps in MRSI space.
-    mrsi_conc_imgs : dict  {metabolite_label: nib.Nifti1Image} — concentration
-        maps in original MRSI space.  Water signal should be included as
-        a reference under the key ``"Water"``.
-    water_img : the raw water signal image in MRSI space.
-    """
+    ses: str = "ses-01"):
+  
     gm_img  = tissue_fracs.get("gm")
     wm_img  = tissue_fracs.get("wm")
     csf_img = tissue_fracs.get("csf")
