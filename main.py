@@ -430,9 +430,9 @@ t1w_in_water_img, t1w_water_transforms = register_t1w_to_mrsi_weighted(
     moving_mask_path=T1W_BRAIN_MASK_DS_PATH 
 )
 
-# ──────────────────────────────────────────────────────────────────────────
-# BET brain mask → MRSI space (Reg-15 brain→sum forward transform)
-# ──────────────────────────────────────────────────────────────────────────
+
+# BET brain mask to  MRSI space (Reg-15 brain to sum forward transform)
+
 BET_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainMaskReg_T1w.nii.gz"
 BET_MASK_REG_PATH = os.path.join(OUTPUT_DIR, BET_MASK_REG_NAME)
 if brain_sum_transforms is not None and os.path.exists(T1W_BRAIN_MASK_PATH):
