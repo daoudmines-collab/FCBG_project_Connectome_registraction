@@ -16,6 +16,7 @@ from registration_utils import (
     register_mrsi_to_t1w,
     register_t1w_to_mrsi,
     register_t1w_to_mrsi_weighted,
+    apply_transform,
     run_total_pipeline)
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -62,25 +63,20 @@ WATER_NAME = f"{SUBJ}_{SES}_desc-WaterSignal_mrsi.nii.gz"
 WATER_PATH = os.path.join(MRS_DIR, WATER_NAME)
 
 MASK_NAME = f"{SUBJ}_{SES}_desc-WaterMask_mrsi.nii.gz"
-MASK_PATH = os.path.join(OUTPUT_DIR, MASK_NAME)
+WATER_MASK_PATH = os.path.join(OUTPUT_DIR, MASK_NAME)
+
 WATER_MASKED_NAME = f"{SUBJ}_{SES}_desc-WaterSignalMasked_mrsi.nii.gz"
 WATER_MASKED_PATH = os.path.join(OUTPUT_DIR, WATER_MASKED_NAME)
 
 water_img = nib.load(WATER_PATH)
-mask_img = fill_mask_holes(
+water_mask_img = fill_mask_holes(
     water_img_path=WATER_PATH,
-    out_mask_path=MASK_PATH,
+    out_mask_path=WATER_MASK_PATH,
     overwrite=True,
 )
 
 # Boolean numpy mask ready to reuse 
-mask = mask_img.get_fdata().astype(bool)
-
-water_masked_data = np.where(mask, water_img.get_fdata(), 0.0).astype(np.float32)
-water_masked_img = nib.Nifti1Image(water_masked_data, water_img.affine, water_img.header)
-water_masked_img.set_data_dtype(np.float32)
-if not os.path.exists(WATER_MASKED_PATH):
-    nib.save(water_masked_img, WATER_MASKED_PATH)
+water_mask = water_mask_img.get_fdata().astype(bool)
 
 
 snr_records = rank_metabolites_by_snr(MRS_DIR, subj=SUBJ, ses=SES)
@@ -94,7 +90,7 @@ MRSI_REG_DS_PATH = os.path.join(OUTPUT_DIR, MRSI_REG_DS_NAME)
 mrsi_reg_ds_img, reg1_transforms = register_mrsi_to_t1w(
     mrsi_img=best_mrsi_img,
     t1w_img=t1w_ds_img,
-    mask=mask,
+    mask=water_mask,
     out_path=MRSI_REG_DS_PATH,
     overwrite=True,
 )
@@ -105,7 +101,7 @@ MRSI_REG_FULLRES_PATH = os.path.join(OUTPUT_DIR, MRSI_REG_FULLRES_NAME)
 mrsi_reg_fullres_img, _ = register_mrsi_to_t1w(
     mrsi_img=best_mrsi_img,
     t1w_img=t1w_img,
-    mask=mask,
+    mask=water_mask,
     out_path=MRSI_REG_FULLRES_PATH,
     overwrite=True,
 )
@@ -117,7 +113,7 @@ if sum_img is not None:
     mrsi_sum_reg_img, reg3_transforms = register_mrsi_to_t1w(
         mrsi_img=sum_img,
         t1w_img=t1w_ds_img,
-        mask=mask,
+        mask=water_mask,
         out_path=MRSI_SUM_REG_PATH,
         overwrite=True,
     )
@@ -132,7 +128,7 @@ if sum_img is not None and reg1_transforms is not None:
     mrsi_sum_xfm_img, _ = register_mrsi_to_t1w(
         mrsi_img=sum_img,
         t1w_img=t1w_ds_img,
-        mask=mask,
+        mask=water_mask,
         out_path=MRSI_SUM_XFM_PATH,
         overwrite=True,
         init_transforms=reg1_transforms,
@@ -147,7 +143,7 @@ if reg3_transforms is not None:
     mrsi_gly_via_sum_img, _ = register_mrsi_to_t1w(
         mrsi_img=best_mrsi_img,
         t1w_img=t1w_ds_img,
-        mask=mask,
+        mask=water_mask,
         out_path=MRSI_GLY_VIA_SUM_PATH,
         overwrite=True,
         init_transforms=reg3_transforms,
@@ -168,7 +164,7 @@ MRSI_COV_REG_PATH = os.path.join(OUTPUT_DIR, MRSI_COV_REG_NAME)
 mrsi_cov_reg_img, reg6_transforms = register_mrsi_to_t1w(
     mrsi_img=best_cov_img,
     t1w_img=t1w_ds_img,
-    mask=mask,
+    mask=water_mask,
     out_path=MRSI_COV_REG_PATH,
     overwrite=True,
 )
@@ -184,7 +180,7 @@ if sum_img is not None:
         mrsi_img=sum_img,
         out_path=T1W_IN_SUM_PATH,
         overwrite=False,
-        mask=mask,
+        mask=water_mask,
     )
 else:
     t1w_in_sum_img, inv_sum_transforms = None, None
@@ -195,7 +191,7 @@ T1W_IN_GLY_PATH = os.path.join(OUTPUT_DIR, T1W_IN_GLY_NAME)
 t1w_in_gly_img, inv_gly_transforms = register_t1w_to_mrsi(
     t1w_img=t1w_ds_img,
     mrsi_img=best_mrsi_img,
-    mask=mask,
+    mask=water_mask,
     out_path=T1W_IN_GLY_PATH,
     overwrite=False,
 )
@@ -224,7 +220,7 @@ T1W_IN_GLY_W_XFM  = T1W_IN_GLY_W_PATH.replace(".nii.gz", "_fwdtransform.mat")
 t1w_in_gly_w_img, inv_gly_w_transforms = register_t1w_to_mrsi_weighted(
     fixed_path=BEST_MRSI_PATH,
     moving_path=T1W_DS_PATH,
-    mask_path=MASK_PATH,
+    mask_path=WATER_MASK_PATH,
     out_path=T1W_IN_GLY_W_PATH,
     transform_path=T1W_IN_GLY_W_XFM,
     overwrite=False,
@@ -238,7 +234,7 @@ if sum_img is not None:
     t1w_in_sum_w_img, inv_sum_w_transforms = register_t1w_to_mrsi_weighted(
         fixed_path=SUM_PATH,
         moving_path=T1W_DS_PATH,
-        mask_path=MASK_PATH,
+        mask_path=WATER_MASK_PATH,
         out_path=T1W_IN_SUM_W_PATH,
         transform_path=T1W_IN_SUM_W_XFM,
         overwrite=False,
@@ -254,7 +250,7 @@ if inv_sum_w_transforms is not None:
     t1w_via_wsum_in_gly_img, _ = register_t1w_to_mrsi_weighted(
         fixed_path=BEST_MRSI_PATH,
         moving_path=T1W_DS_PATH,
-        mask_path=MASK_PATH,
+        mask_path=WATER_MASK_PATH,
         out_path=T1W_VIA_WSUM_IN_GLY_PATH,
         transform_path=T1W_VIA_WSUM_IN_GLY_XFM,
         overwrite=False,
@@ -269,7 +265,7 @@ WATER_REG_PATH = os.path.join(OUTPUT_DIR, WATER_REG_NAME)
 water_reg_img, _ = register_mrsi_to_t1w(
     mrsi_img=water_img,
     t1w_img=t1w_ds_img,
-    mask=mask,
+    mask=water_mask,
     out_path=WATER_REG_PATH,
     overwrite=False,
     init_transforms=reg1_transforms,
@@ -277,7 +273,7 @@ water_reg_img, _ = register_mrsi_to_t1w(
 
 # Skull-stripping plus skull-stripped inverse registrations
 
-# Step 1 – Skull-strip the full-resolution T1w (BET works best at native res)
+# Step 1 – Skull-strip the full-resolution T1w 
 T1W_BRAIN_NAME = f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w.nii.gz"
 T1W_BRAIN_PATH = os.path.join(OUTPUT_DIR, T1W_BRAIN_NAME)
 t1w_brain_img = skull_strip_t1w(
@@ -309,7 +305,7 @@ if not os.path.exists(T1W_BRAIN_MASK_DS_PATH) and os.path.exists(T1W_BRAIN_MASK_
     nib.save(_mask_ds, T1W_BRAIN_MASK_DS_PATH)
     print(f"  [bet-mask-ds] saved {T1W_BRAIN_MASK_DS_NAME}")
 
-# # FSL FAST tissue segmentation on the full-resolution skull-stripped T1w
+#  FSL FAST tissue segmentation on the full-resolution skull-stripped T1w
 SEG_PREFIX  = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_seg")
 seg_imgs = segment_t1w(
     brain_path=T1W_BRAIN_PATH,
@@ -321,14 +317,14 @@ PVE_CSF_PATH = f"{SEG_PREFIX}_pve_0.nii.gz"
 PVE_GM_PATH  = f"{SEG_PREFIX}_pve_1.nii.gz"
 PVE_WM_PATH  = f"{SEG_PREFIX}_pve_2.nii.gz"
 
- # Atlas-based parcellation: FLIRT to MNI152, Harvard-Oxford cortical + subcortical
-ATLAS_PREFIX = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_atlas")
-atlas_imgs = segment_t1w_atlas(
-     brain_path=T1W_BRAIN_PATH,
-     out_prefix=ATLAS_PREFIX,
-     nonlinear=False,
-     overwrite=False,
- )
+#  # Atlas-based parcellation: FLIRT to MNI152, Harvard-Oxford cortical + subcortical
+# ATLAS_PREFIX = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_acq-FullRes_desc-Brain_T1w_atlas")
+# atlas_imgs = segment_t1w_atlas(
+#      brain_path=T1W_BRAIN_PATH,
+#      out_prefix=ATLAS_PREFIX,
+#      nonlinear=False,
+#      overwrite=False,
+#  )
 
 # Registration 14: skull-stripped T1w DS to best SNR MRSI (Gly), water-weighted
 T1W_BRAIN_IN_GLY_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainT1wInGly_T1w.nii.gz"
@@ -338,7 +334,7 @@ _brain_mask_arg = T1W_BRAIN_MASK_DS_PATH if os.path.exists(T1W_BRAIN_MASK_DS_PAT
 t1w_brain_in_gly_img, brain_gly_transforms = register_t1w_to_mrsi_weighted(
     fixed_path=BEST_MRSI_PATH,
     moving_path=T1W_DS_BRAIN_PATH,
-    mask_path=MASK_PATH,
+    mask_path=WATER_MASK_PATH,
     out_path=T1W_BRAIN_IN_GLY_PATH,
     transform_path=T1W_BRAIN_IN_GLY_XFM,
     overwrite=False,
@@ -349,18 +345,16 @@ t1w_brain_in_gly_img, brain_gly_transforms = register_t1w_to_mrsi_weighted(
 T1W_BRAIN_IN_SUM_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainT1wInSum_T1w.nii.gz"
 T1W_BRAIN_IN_SUM_PATH = os.path.join(OUTPUT_DIR, T1W_BRAIN_IN_SUM_NAME)
 T1W_BRAIN_IN_SUM_XFM  = T1W_BRAIN_IN_SUM_PATH.replace(".nii.gz", "_fwdtransform.mat")
-if sum_img is not None:
-    t1w_brain_in_sum_img, brain_sum_transforms = register_t1w_to_mrsi_weighted(
+
+t1w_brain_in_sum_img, brain_sum_transforms = register_t1w_to_mrsi_weighted(
         fixed_path=SUM_PATH,
         moving_path=T1W_DS_BRAIN_PATH,
-        mask_path=MASK_PATH,
+        mask_path=WATER_MASK_PATH,
         out_path=T1W_BRAIN_IN_SUM_PATH,
         transform_path=T1W_BRAIN_IN_SUM_XFM,
         overwrite=False,
-        moving_mask_path=_brain_mask_arg,
-    )
-else:
-    t1w_brain_in_sum_img, brain_sum_transforms = None, None
+        moving_mask_path=_brain_mask_arg)
+
 
 # Registration 16: skull-stripped T1w in Gly space via sum transform (reuse Reg 15)
 T1W_BRAIN_VIA_SUM_IN_GLY_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainT1wViaSumInGly_T1w.nii.gz"
@@ -370,7 +364,7 @@ if brain_sum_transforms is not None:
     t1w_brain_via_sum_in_gly_img, _ = register_t1w_to_mrsi_weighted(
         fixed_path=BEST_MRSI_PATH,
         moving_path=T1W_DS_BRAIN_PATH,
-        mask_path=MASK_PATH,
+        mask_path=WATER_MASK_PATH,
         out_path=T1W_BRAIN_VIA_SUM_IN_GLY_PATH,
         transform_path=T1W_BRAIN_VIA_SUM_IN_GLY_XFM,
         overwrite=False,
@@ -381,12 +375,10 @@ else:
 
 
 #  Total pipeline registration 17 
-(
-    t1w_brain_in_sum_ras_img,
+(t1w_brain_in_sum_ras_img,
     brain_sum_ras_transforms,
     final_reg_imgs,
-    metrics,
-) = run_total_pipeline(
+    metrics) = run_total_pipeline(
     bids_dir=BIDS_DIR,
     mrs_dir=MRS_DIR,
     water_path=WATER_PATH,
@@ -396,10 +388,8 @@ else:
     ses=SES,
     output_dir=OUTPUT_DIR,
     overwrite=False,
-    t1w_brain_mask_ds_path=_brain_mask_arg,
-)
+    t1w_brain_mask_ds_path=_brain_mask_arg)
 
-# Paths produced by the pipeline (used in the notebook)
 SUM_RAS_NAME              = f"{SUBJ}_{SES}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
 SUM_RAS_PATH              = os.path.join(OUTPUT_DIR, SUM_RAS_NAME)
 WATER_RAS_NAME            = f"{SUBJ}_{SES}_desc-WaterSignalRAS_mrsi.nii.gz"
@@ -419,13 +409,12 @@ T1W_IN_WATER_VIA17_XFM  = T1W_IN_WATER_VIA17_PATH.replace(".nii.gz", "_fwdtransf
 t1w_in_water_via17_img, _ = register_t1w_to_mrsi_weighted(
         fixed_path=WATER_PATH,
         moving_path=T1W_DS_PATH,
-        mask_path=MASK_PATH,
+        mask_path=WATER_MASK_PATH,
         out_path=T1W_IN_WATER_VIA17_PATH,
         transform_path=T1W_IN_WATER_VIA17_XFM,
         overwrite=False,
         init_transforms=inv_sum_w_transforms,
-        moving_mask_path=T1W_BRAIN_MASK_DS_PATH if os.path.exists(T1W_BRAIN_MASK_DS_PATH) else None,
-    )
+        moving_mask_path=T1W_BRAIN_MASK_DS_PATH)
 
 # (b) Reg-18: DS T1w to  water signal map (ANTs CLI rigid, brain mask)
 T1W_IN_WATER_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-T1wInWaterReg18_T1w.nii.gz"
@@ -434,12 +423,29 @@ T1W_IN_WATER_XFM  = T1W_IN_WATER_PATH.replace(".nii.gz", "_fwdtransform.mat")
 t1w_in_water_img, t1w_water_transforms = register_t1w_to_mrsi_weighted(
     fixed_path=WATER_PATH,
     moving_path=T1W_DS_PATH,
-    mask_path=MASK_PATH,
+    mask_path=WATER_MASK_PATH,
     out_path=T1W_IN_WATER_PATH,
     transform_path=T1W_IN_WATER_XFM,
     overwrite=False,
-    moving_mask_path=T1W_BRAIN_MASK_DS_PATH if os.path.exists(T1W_BRAIN_MASK_DS_PATH) else None,
+    moving_mask_path=T1W_BRAIN_MASK_DS_PATH 
 )
+
+# ──────────────────────────────────────────────────────────────────────────
+# BET brain mask → MRSI space (Reg-15 brain→sum forward transform)
+# ──────────────────────────────────────────────────────────────────────────
+BET_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainMaskReg_T1w.nii.gz"
+BET_MASK_REG_PATH = os.path.join(OUTPUT_DIR, BET_MASK_REG_NAME)
+if brain_sum_transforms is not None and os.path.exists(T1W_BRAIN_MASK_PATH):
+    bet_mask_reg_img = apply_transform(
+        in_path=T1W_BRAIN_MASK_PATH,
+        ref_path=SUM_PATH,
+        transform_path=brain_sum_transforms[0],
+        out_path=BET_MASK_REG_PATH,
+        interpolation="NearestNeighbor",
+        overwrite=False,
+    )
+else:
+    bet_mask_reg_img = nib.load(BET_MASK_REG_PATH) if os.path.exists(BET_MASK_REG_PATH) else None
 
 # # ──────────────────────────────────────────────────────────────────────────
 # # Section 25 – Registration comparison dict (T1w images in MRSI space)

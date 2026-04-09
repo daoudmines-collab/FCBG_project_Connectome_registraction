@@ -235,6 +235,29 @@ def register_t1w_to_mrsi_weighted(
 
     return reg_img, [transform_path]
 
+def apply_transform(
+    in_path: str,
+    ref_path: str,
+    transform_path: str,
+    out_path: str,
+    interpolation: str = "Linear",
+    overwrite: bool = False):
+    """Apply a single forward transform with antsApplyTransforms."""
+    if os.path.exists(out_path) and not overwrite:
+        print(f"  [apply-xfm] already exists: {out_path}")
+        return nib.load(out_path)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    subprocess.run([
+        "antsApplyTransforms", "-d", "3",
+        "-i", in_path,
+        "-r", ref_path,
+        "-t", transform_path,
+        "-n", interpolation,
+        "-o", out_path,
+    ], check=True)
+    print(f"  [apply-xfm] saved {os.path.basename(out_path)}")
+    return nib.load(out_path)
+
 def apply_transform_to_metabolite(
     mrsi_path: str,
     transform_path: str,

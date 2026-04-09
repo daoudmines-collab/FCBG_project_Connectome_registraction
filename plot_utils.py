@@ -1522,7 +1522,19 @@ def plot_segmentation(
         if overlay is not None:
             data  = overlay.get_fdata()
             vmax  = float(np.nanpercentile(data[data > 0], 99)) if (data > 0).any() else 1.0
-        
+            plotting.plot_stat_map(
+                overlay,
+                bg_img=t1w_img,
+                display_mode="ortho",
+                cut_coords=cut_coords,
+                colorbar=True,
+                title=title,
+                axes=ax_top,
+                black_bg=True,
+                cmap=cmap,
+                vmax=vmax,
+                alpha=alpha,
+            )
         else:
             ax_top.set_facecolor(BG)
             ax_top.text(0.5, 0.5, f"{title}\nnot available",
