@@ -354,11 +354,14 @@ def compute_registration_metrics(
             ncc   = float((t1w_c * mrs_c).sum() / (denom + 1e-10))
             # NMI
             nmi = _mutual_information(t1w_vals, mrsi_vals)
+            # in-region SNR: mean / std within overlap (higher = more uniform signal = better reg)
+            snr = float(mrsi_vals.mean()) / (float(mrsi_vals.std()) + 1e-9)
         else:
             ncc = 0.0
             nmi = 0.0
+            snr = 0.0
 
-        records.append({"label": label, "coverage": coverage, "ncc": ncc, "nmi": nmi})
+        records.append({"label": label, "coverage": coverage, "ncc": ncc, "nmi": nmi, "snr": snr})
     records.sort(key=lambda r: abs(r["ncc"]), reverse=True)
     return records
 
@@ -421,6 +424,18 @@ def run_total_pipeline(
             ses=ses,
             overwrite=overwrite,
         )
+        # Also register the RAS water signal with the same transform (used as reference)
+        os.makedirs(final_reg_dir, exist_ok=True)
+        water_reg_name = f"{subj}_{ses}_acq-MRSIres_desc-WaterSignalReg17_T1w.nii.gz"
+        water_reg_img = apply_transform_to_metabolite(
+            mrsi_path=water_ras_path,
+            transform_path=brain_sum_ras_transforms[0],
+            t1w_ref_path=t1w_ds_brain_path,
+            out_path=os.path.join(final_reg_dir, water_reg_name),
+            overwrite=overwrite,
+        )
+        if water_reg_img is not None:
+            final_reg_imgs["WaterSignal"] = water_reg_img
     else:
         final_reg_imgs = {}
         print("  [pipeline] Step 4 skipped – Reg-17 transform not available.")

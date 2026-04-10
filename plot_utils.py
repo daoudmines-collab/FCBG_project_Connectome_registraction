@@ -1370,9 +1370,10 @@ def plot_registration_metrics(
 
    
     labels_raw = [r["label"]    for r in metrics]
-    coverage   = np.array([r["coverage"] for r in metrics], dtype=float)
-    ncc        = np.array([r["ncc"]      for r in metrics], dtype=float)
-    nmi        = np.array([r["nmi"]      for r in metrics], dtype=float)
+    coverage   = np.array([r["coverage"]      for r in metrics], dtype=float)
+    ncc        = np.array([r["ncc"]           for r in metrics], dtype=float)
+    nmi        = np.array([r["nmi"]           for r in metrics], dtype=float)
+    snr        = np.array([r.get("snr", 0.0) for r in metrics], dtype=float)
 
     # short display labels (strip common BIDS prefixes)
     def _short(lbl):
@@ -1381,21 +1382,24 @@ def plot_registration_metrics(
         return lbl
     labels = [_short(l) for l in labels_raw]
 
-    cmap_cov = plt.get_cmap("viridis")
-    vmin_c, vmax_c = coverage.min(), max(coverage.max(), 1e-6)
-    dot_colors = [cmap_cov((v - vmin_c) / (vmax_c - vmin_c)) for v in coverage]
+    cmap_snr = plt.get_cmap("plasma")
+    vmin_c, vmax_c = snr.min(), max(snr.max(), 1e-6)
+    dot_colors = [cmap_snr((v - vmin_c) / (vmax_c - vmin_c)) for v in snr]
 
     BG   = "#0d0d0d"
     PAN  = "#1a1a1a"
     GREY = "#444444"
     TXT  = "white"
 
+    n      = len(labels)
+    fig_h  = max(11, n * 0.32 + 4)   # grow with number of metabolites
+
     fig, axes = plt.subplots(
         2, 2,
-        figsize=(15, 11),
+        figsize=(16, fig_h),
         facecolor=BG,
+        constrained_layout=True,
     )
-    fig.subplots_adjust(hspace=0.42, wspace=0.38)
 
   
     def _lollipop(ax, values, sort_idx, xlabel, title, ref_line=None):
@@ -1406,8 +1410,8 @@ def plot_registration_metrics(
         vcols   = [dot_colors[i] for i in sort_idx]
 
         ax.hlines(y, 0, vvals, color=GREY, linewidth=1.2, zorder=1)
-        sc = ax.scatter(vvals, y, c=[coverage[i] for i in sort_idx],
-                        cmap="viridis", vmin=vmin_c, vmax=vmax_c,
+        sc = ax.scatter(vvals, y, c=[snr[i] for i in sort_idx],
+                        cmap="plasma", vmin=vmin_c, vmax=vmax_c,
                         s=70, zorder=3, edgecolors="white", linewidths=0.4)
 
         if ref_line is not None:
@@ -1436,21 +1440,21 @@ def plot_registration_metrics(
                     "Normalised Mutual Information (NMI)",
                     "NMI  –  ranked by quality  (↑ best)")
 
-    # shared colorbar for both lollipop panels
-    sm = plt.cm.ScalarMappable(cmap="viridis",
+    # shared colorbar – attached to right column so it sits at the outer right edge
+    sm = plt.cm.ScalarMappable(cmap="plasma",
                                norm=plt.Normalize(vmin=vmin_c, vmax=vmax_c))
     sm.set_array([])
-    cb = fig.colorbar(sm, ax=axes[0, :], orientation="vertical",
-                      fraction=0.015, pad=0.02, shrink=0.8)
-    cb.set_label("Coverage", color=TXT, fontsize=9)
+    cb = fig.colorbar(sm, ax=axes[:, 1], location="right",
+                      shrink=0.6, pad=0.02)
+    cb.set_label("In-region SNR (mean/std)", color=TXT, fontsize=9)
     cb.ax.yaxis.set_tick_params(color=TXT, labelcolor=TXT)
 
     
     def _scatter(ax, xvals, yvals, xlabel, ylabel, title,
                  xref=None, yref=None):
         ax.set_facecolor(PAN)
-        sc = ax.scatter(xvals, yvals, c=coverage,
-                        cmap="viridis", vmin=vmin_c, vmax=vmax_c,
+        sc = ax.scatter(xvals, yvals, c=snr,
+                        cmap="plasma", vmin=vmin_c, vmax=vmax_c,
                         s=65, zorder=3, edgecolors="white", linewidths=0.4)
         for i, lbl in enumerate(labels):
             ax.annotate(lbl, (xvals[i], yvals[i]),
@@ -1474,27 +1478,191 @@ def plot_registration_metrics(
     # panel 3: NCC vs NMI scatter
     _scatter(axes[1, 0], ncc, nmi,
              "NCC", "NMI",
-             "NCC vs NMI  (colour = coverage)",
+             "NCC vs NMI  (colour = SNR)",
              xref=0.0)
 
-    # panel 4: Coverage vs NCC
-    _scatter(axes[1, 1], coverage, ncc,
-             "Coverage", "NCC",
-             "Coverage vs NCC  (colour = coverage)",
+    # panel 4: SNR vs NCC
+    _scatter(axes[1, 1], snr, ncc,
+             "In-region SNR (mean/std)", "NCC",
+             "SNR vs NCC  (colour = SNR)",
              yref=0.0)
 
     fig.suptitle(
         f"{subj}  {ses}  –  Registration quality metrics  (Reg-17 total pipeline)",
+        color=TXT, fontsize=12,
+    )
+    plt.show()
+
+    # print table 
+    print(f"\n{'Label':<35}  {'Coverage':>9}  {'NCC':>8}  {'NMI':>8}  {'SNR':>8}")
+    print("─" * 75)
+    for r in metrics:
+        print(f"{r['label']:<35}  {r['coverage']:>9.3f}  {r['ncc']:>8.4f}  {r['nmi']:>8.4f}  {r.get('snr', 0.0):>8.3f}")
+
+def plot_pipeline_metrics_comparison(
+    metrics_a: list,
+    metrics_b: list,
+    label_a: str = "BET mask (Reg-17a)",
+    label_b: str = "FreeSurfer mask (Reg-17b)",
+    subj: str = "sub-01",
+    ses: str = "ses-01"):
+    """Side-by-side comparison of registration quality metrics for two pipelines.
+
+    Four panels:
+    - Top-left  : NCC lollipop (both pipelines, sorted by mean |NCC|)
+    - Top-right : NMI lollipop (both pipelines, sorted by mean NMI)
+    - Bottom-left: NCC vs NMI scatter (both pipelines, connected per metabolite)
+    - Bottom-right: Δ bar chart (FreeSurfer − BET for NCC and NMI)
+    """
+    if not metrics_a or not metrics_b:
+        print("[pipeline comparison] one or both metrics lists are empty.")
+        return
+
+    def _short(lbl):
+        for prefix in ("acq-OrigRes_", "acq-", "desc-"):
+            lbl = lbl.replace(prefix, "")
+        return lbl
+
+    a_by_label = {r["label"]: r for r in metrics_a}
+    b_by_label = {r["label"]: r for r in metrics_b}
+    common     = sorted(set(a_by_label) & set(b_by_label),
+                        key=lambda l: -(abs(a_by_label[l]["ncc"]) + abs(b_by_label[l]["ncc"])) / 2)
+
+    if not common:
+        print("[pipeline comparison] no common metabolite labels found between the two pipelines.")
+        return
+
+    ncc_a = np.array([a_by_label[l]["ncc"]           for l in common], dtype=float)
+    ncc_b = np.array([b_by_label[l]["ncc"]           for l in common], dtype=float)
+    nmi_a = np.array([a_by_label[l]["nmi"]           for l in common], dtype=float)
+    nmi_b = np.array([b_by_label[l]["nmi"]           for l in common], dtype=float)
+    snr_a = np.array([a_by_label[l].get("snr", 0.0) for l in common], dtype=float)
+    snr_b = np.array([b_by_label[l].get("snr", 0.0) for l in common], dtype=float)
+    labels = [_short(l) for l in common]
+
+    BG      = "#0d0d0d"
+    PAN     = "#1a1a1a"
+    GREY    = "#444444"
+    TXT     = "white"
+    COLOR_A = "#f4a261"   # orange  → BET
+    COLOR_B = "#4cc9f0"   # cyan    → FreeSurfer
+
+    n       = len(labels)
+    order_ncc = np.argsort((np.abs(ncc_a) + np.abs(ncc_b)) / 2)
+    order_nmi = np.argsort((nmi_a + nmi_b) / 2)
+
+    fig, axes = plt.subplots(2, 2, figsize=(18, max(10, n * 0.4 + 3)), facecolor=BG)
+    fig.subplots_adjust(hspace=0.45, wspace=0.45)
+
+    def _lollipop_pair(ax, vals_a, vals_b, sort_idx, xlabel, title, ref_line=None):
+        ax.set_facecolor(PAN)
+        y = np.arange(len(sort_idx))
+        _la = [labels[i] for i in sort_idx]
+        _va = vals_a[sort_idx]
+        _vb = vals_b[sort_idx]
+
+        # stagger rows slightly so dots don't overlap
+        ax.hlines(y - 0.18, 0, _va, color=COLOR_A, linewidth=1.1, zorder=1, alpha=0.7)
+        ax.scatter(_va, y - 0.18, c=COLOR_A, s=55, zorder=3,
+                   edgecolors="white", linewidths=0.3, label=label_a)
+        ax.hlines(y + 0.18, 0, _vb, color=COLOR_B, linewidth=1.1, zorder=1, alpha=0.7)
+        ax.scatter(_vb, y + 0.18, c=COLOR_B, s=55, marker="s", zorder=3,
+                   edgecolors="white", linewidths=0.3, label=label_b)
+
+        if ref_line is not None:
+            ax.axvline(ref_line, color="white", linestyle="--", linewidth=0.7, alpha=0.4, zorder=2)
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(_la, color=TXT, fontsize=7.5)
+        ax.set_xlabel(xlabel, color=TXT, fontsize=9)
+        ax.set_title(title, color=TXT, fontsize=10, pad=6)
+        ax.tick_params(colors=TXT, labelsize=8)
+        ax.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(GREY)
+        ax.legend(facecolor="#222222", labelcolor="white", fontsize=8, loc="lower right")
+
+    _lollipop_pair(
+        axes[0, 0], ncc_a, ncc_b, order_ncc,
+        "NCC  (negative = anti-correlated, expected MRSI vs T1w UNI-DEN)",
+        f"NCC: {label_a} vs {label_b}",
+        ref_line=0.0,
+    )
+    _lollipop_pair(
+        axes[0, 1], nmi_a, nmi_b, order_nmi,
+        "Normalised Mutual Information (NMI)",
+        f"NMI: {label_a} vs {label_b}",
+    )
+
+    # bottom-left: NCC vs NMI scatter, both pipelines with connecting lines
+    ax_sc = axes[1, 0]
+    ax_sc.set_facecolor(PAN)
+    for na, nb, ma, mb in zip(ncc_a, ncc_b, nmi_a, nmi_b):
+        ax_sc.plot([na, nb], [ma, mb], color="white", linewidth=0.5, alpha=0.2, zorder=2)
+    ax_sc.scatter(ncc_a, nmi_a, c=COLOR_A, s=60, zorder=3,
+                  edgecolors="white", linewidths=0.3, label=label_a, alpha=0.9)
+    ax_sc.scatter(ncc_b, nmi_b, c=COLOR_B, s=60, marker="s", zorder=3,
+                  edgecolors="white", linewidths=0.3, label=label_b, alpha=0.9)
+    ax_sc.axvline(0, color="white", linestyle="--", linewidth=0.7, alpha=0.4)
+    ax_sc.set_xlabel("NCC", color=TXT, fontsize=9)
+    ax_sc.set_ylabel("NMI", color=TXT, fontsize=9)
+    ax_sc.set_title("NCC vs NMI  (lines connect same metabolite)", color=TXT, fontsize=10, pad=6)
+    ax_sc.tick_params(colors=TXT, labelsize=8)
+    ax_sc.grid(color=GREY, linewidth=0.4, zorder=0)
+    for spine in ax_sc.spines.values():
+        spine.set_edgecolor(GREY)
+    ax_sc.legend(facecolor="#222222", labelcolor="white", fontsize=8)
+
+    # bottom-right: delta bar chart (FreeSurfer − BET)
+    ax_d = axes[1, 1]
+    ax_d.set_facecolor(PAN)
+    delta_ncc = ncc_b - ncc_a
+    delta_nmi = nmi_b - nmi_a
+    delta_snr = snr_b - snr_a
+    order_d   = np.argsort(delta_ncc)
+    _yd       = np.arange(len(order_d))
+    _ld       = [labels[i] for i in order_d]
+
+    ax_d.barh(_yd - 0.25, delta_ncc[order_d], height=0.25, color=COLOR_A,
+              label="ΔNCC", alpha=0.9, zorder=2)
+    ax_d.barh(_yd,         delta_nmi[order_d] * 10, height=0.25, color=COLOR_B,
+              label="ΔNMI ×10", alpha=0.9, zorder=2)
+    ax_d.barh(_yd + 0.25, delta_snr[order_d] * 0.01, height=0.25, color="#90e0b0",
+              label="ΔSNR ×0.01", alpha=0.9, zorder=2)
+    ax_d.axvline(0, color="white", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax_d.set_yticks(_yd)
+    ax_d.set_yticklabels(_ld, color=TXT, fontsize=7.5)
+    ax_d.set_xlabel(f"Δ ({label_b} − {label_a})\npositive = FreeSurfer better",
+                    color=TXT, fontsize=9)
+    ax_d.set_title("Per-metabolite pipeline delta", color=TXT, fontsize=10, pad=6)
+    ax_d.tick_params(colors=TXT, labelsize=8)
+    ax_d.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
+    for spine in ax_d.spines.values():
+        spine.set_edgecolor(GREY)
+    ax_d.legend(facecolor="#222222", labelcolor="white", fontsize=8)
+
+    fig.suptitle(
+        f"{subj}  {ses}  –  Pipeline comparison: {label_a} vs {label_b}\n"
+        f"Reg-17 total pipeline  (rigid ANTs, skull-stripped T1w → RAS MRSI sum, water-weighted)",
         color=TXT, fontsize=12, y=1.01,
     )
     plt.tight_layout()
     plt.show()
 
-    # print table 
-    print(f"\n{'Label':<35}  {'Coverage':>9}  {'NCC':>8}  {'NMI':>8}")
-    print("─" * 65)
-    for r in metrics:
-        print(f"{r['label']:<35}  {r['coverage']:>9.3f}  {r['ncc']:>8.4f}  {r['nmi']:>8.4f}")
+    # print summary table
+    header = (f"\n{'Label':<35}  {'NCC(A)':>9}  {'NCC(B)':>9}  {'ΔNCC':>8}  "
+              f"{'NMI(A)':>9}  {'NMI(B)':>9}  {'ΔNMI':>8}  {'SNR(A)':>8}  {'SNR(B)':>8}")
+    print(header)
+    print("─" * len(header.strip()))
+    for l, ra, rb in zip(common,
+                         [a_by_label[l] for l in common],
+                         [b_by_label[l] for l in common]):
+        sl = _short(l)
+        print(
+            f"{sl:<35}  {ra['ncc']:>9.4f}  {rb['ncc']:>9.4f}  {rb['ncc'] - ra['ncc']:>+8.4f}  "
+            f"{ra['nmi']:>9.4f}  {rb['nmi']:>9.4f}  {rb['nmi'] - ra['nmi']:>+8.4f}  "
+            f"{ra.get('snr', 0.0):>8.3f}  {rb.get('snr', 0.0):>8.3f}"
+        )
 
 def plot_final_registration_mosaic(
     t1w_img: nib.Nifti1Image,
