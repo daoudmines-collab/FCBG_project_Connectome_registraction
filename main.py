@@ -435,17 +435,31 @@ t1w_in_water_img, t1w_water_transforms = register_t1w_to_mrsi_weighted(
 
 BET_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainMaskReg_T1w.nii.gz"
 BET_MASK_REG_PATH = os.path.join(OUTPUT_DIR, BET_MASK_REG_NAME)
-if brain_sum_transforms is not None and os.path.exists(T1W_BRAIN_MASK_PATH):
-    bet_mask_reg_img = apply_transform(
+
+# freesurfer brain mask to  MRSI space (Reg-15 brain to sum forward transform)
+FREESURFER_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-UNIDEND_T1w_brainatlasmore_mask.nii"
+FREESURFER_MASK_REG_PATH = os.path.join(OUTPUT_DIR, FREESURFER_MASK_REG_NAME)
+
+bet_mask_reg_img = apply_transform(
         in_path=T1W_BRAIN_MASK_PATH,
         ref_path=SUM_PATH,
         transform_path=brain_sum_transforms[0],
         out_path=BET_MASK_REG_PATH,
-        interpolation="NearestNeighbor",
-        overwrite=False,
-    )
-else:
-    bet_mask_reg_img = nib.load(BET_MASK_REG_PATH) if os.path.exists(BET_MASK_REG_PATH) else None
+        overwrite=False)
+
+freesurfer_mask_reg_img = apply_transform(
+        in_path=T1W_BRAIN_MASK_PATH,
+        ref_path=SUM_PATH,
+        transform_path=brain_sum_transforms[0],
+        out_path=FREESURFER_MASK_REG_PATH,
+        overwrite=False)
+
+water_mask_reg_img = apply_transform(
+        in_path=WATER_MASK_PATH,
+        ref_path=SUM_PATH,
+        transform_path=brain_sum_transforms[0],
+        out_path=FREESURFER_MASK_REG_PATH,
+        overwrite=False)
 
 # # ──────────────────────────────────────────────────────────────────────────
 # # Section 25 – Registration comparison dict (T1w images in MRSI space)

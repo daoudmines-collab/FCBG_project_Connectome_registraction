@@ -1740,17 +1740,18 @@ def plot_mrsi_sum_mask_contours(
     plt.show()
 
 
-def plot_bet_vs_water_mask(
+def plot_mask_coverage_comparaison(
     bet_mask_img:    "nib.Nifti1Image",
     water_mask_img:  "nib.Nifti1Image",
     t1w_ds_img:      "nib.Nifti1Image",
-    subj:            str = "sub-01",
-    ses:             str = "ses-01",
+    extra_mask_img:  "nib.Nifti1Image",
     active_mask_name: str | None = None,
     n_slices: int = 7):
     bet_data   = bet_mask_img.get_fdata().astype(bool)
     water_data = water_mask_img.get_fdata().astype(bool)
     t1w_data   = t1w_ds_img.get_fdata().astype(np.float32)
+    
+    extra_data = extra_mask_img.get_fdata().astype(bool)
 
     vox_vol_mm3 = float(np.abs(np.linalg.det(bet_mask_img.affine[:3, :3])))
 
@@ -1767,19 +1768,43 @@ def plot_bet_vs_water_mask(
     dice    = 2 * n_inter / (n_bet + n_water + 1e-10)
     jaccard = n_inter / (n_bet + n_water - n_inter + 1e-10)
 
+    all3_inter   = bet_data & water_data & extra_data
+    bet_extra_i  = bet_data & extra_data
+    wat_extra_i  = water_data & extra_data
+    extra_only   = extra_data & ~bet_data & ~water_data
+    n_extra      = int(extra_data.sum())
+    n_eonly      = int(extra_only.sum())
+    n_all3       = int(all3_inter.sum())
+    dice_be      = 2 * int(bet_extra_i.sum())  / (n_bet + n_extra + 1e-10)
+    dice_we      = 2 * int(wat_extra_i.sum())  / (n_water + n_extra + 1e-10)
+    jacc_be      = int(bet_extra_i.sum())  / (n_bet + n_extra - int(bet_extra_i.sum()) + 1e-10)
+    jacc_we      = int(wat_extra_i.sum())  / (n_water + n_extra - int(wat_extra_i.sum()) + 1e-10)
+    # exclusive-only regions for comparison row
+    bet_excl   = bet_data  & ~water_data & ~extra_data
+    water_excl = water_data & ~bet_data  & ~extra_data
+    any_overlap = (bet_data.astype(np.uint8) + water_data.astype(np.uint8) +
+                       extra_data.astype(np.uint8)) >= 2
+
     # ── Text table ────────────────────────────────────────────────────────
-    sep = "─" * 44
+    sep = "─" * 52
     print(sep)
     print(f"  Mask comparison (MRSI grid)")
     print(sep)
-    print(f"  BET mask volume   : {n_bet   * vox_vol_mm3/1000:>8.1f} mL  ({n_bet:>6} vox)")
-    print(f"  Water mask volume : {n_water * vox_vol_mm3/1000:>8.1f} mL  ({n_water:>6} vox)")
-    print(f"  Intersection      : {n_inter * vox_vol_mm3/1000:>8.1f} mL  ({n_inter:>6} vox)")
-    print(f"  BET-only voxels   : {n_bonly * vox_vol_mm3/1000:>8.1f} mL  ({n_bonly:>6} vox)")
-    print(f"  Water-only voxels : {n_wonly * vox_vol_mm3/1000:>8.1f} mL  ({n_wonly:>6} vox)")
-    print(f"  Dice coefficient  : {dice:.4f}  (1.0 = identical)")
-    print(f"  Jaccard index     : {jaccard:.4f}")
-    print(f"  Masks are identical : {bool(np.array_equal(bet_data, water_data))}")
+    print(f"  BET mask volume      : {n_bet   * vox_vol_mm3/1000:>8.1f} mL  ({n_bet:>6} vox)")
+    print(f"  Water mask volume    : {n_water * vox_vol_mm3/1000:>8.1f} mL  ({n_water:>6} vox)")
+    
+    print(f"  FREESURFER mask volume : {n_extra * vox_vol_mm3/1000:>8.1f} mL  ({n_extra:>6} vox)")
+    print(sep)
+    print(f"  BET ∩ Water          : {n_inter * vox_vol_mm3/1000:>8.1f} mL  ({n_inter:>6} vox)")
+    print(f"  BET-only voxels      : {n_bonly * vox_vol_mm3/1000:>8.1f} mL  ({n_bonly:>6} vox)")
+    print(f"  Water-only voxels    : {n_wonly * vox_vol_mm3/1000:>8.1f} mL  ({n_wonly:>6} vox)")
+    print(f"  Dice  BET/Water      : {dice:.4f}  Jaccard: {jaccard:.4f}")
+  
+    print(f"  Dice  BET/FREESURFER : {dice_be:.4f}  Jaccard: {jacc_be:.4f}")
+    print(f"  Dice  Water/FREESURFER : {dice_we:.4f}  Jaccard: {jacc_we:.4f}")
+    print(f"  All-3 intersection   : {n_all3 * vox_vol_mm3/1000:>8.1f} mL  ({n_all3:>6} vox)")
+    print(f"  FREESURFERmask-only voxels : {n_eonly * vox_vol_mm3/1000:>8.1f} mL  ({n_eonly:>6} vox)")
+    print(f"  BET ≡ Water          : {bool(np.array_equal(bet_data, water_data))}")
     print(sep)
     if active_mask_name:
         print(f"\n  ACTIVE mask for Reg 18 : {active_mask_name}")
@@ -1790,11 +1815,13 @@ def plot_bet_vs_water_mask(
 
     t1w_max = np.percentile(t1w_data[t1w_data > 0], 99) if t1w_data.max() > 0 else 1.0
 
-    fig, axes = plt.subplots(3, n_slices,
-                             figsize=(2.8 * n_slices, 9),
+    n_rows = 4 
+    fig_h  = 3.0 * n_rows
+    fig, axes = plt.subplots(n_rows, n_slices,
+                             figsize=(2.8 * n_slices, fig_h),
                              facecolor="black")
 
-    row_labels = ["BET mask", "Water mask", "Comparison"]
+    row_labels = ["BET mask", "Water mask","freeSurfer mask", "Comparison"]
 
     for col, z in enumerate(z_indices):
         t1w_slc = t1w_data[:, :, z].T
@@ -1822,43 +1849,66 @@ def plot_bet_vs_water_mask(
                   alpha=0.55, interpolation="nearest")
         ax.axis("off")
 
-        # Row 2 – Comparison: BET-only red, water-only blue, overlap grey
+       
+        # Row 2 – Extra mask on T1w
+        ext_slc = extra_data[:, :, z].T.astype(np.float32)
         ax = axes[2, col]
         ax.set_facecolor("black")
         ax.imshow(t1w_slc, origin="lower", cmap="gray",
-                  vmin=0, vmax=t1w_max, alpha=0.25, interpolation="nearest")
-        # overlap
-        ov = intersection[:, :, z].T.astype(np.float32)
-        ax.imshow(np.ma.masked_where(ov == 0, ov),
-                  origin="lower", cmap="gray", vmin=0, vmax=1,
-                  alpha=0.65, interpolation="nearest")
-        # water-only
-        wo = water_only[:, :, z].T.astype(np.float32)
-        ax.imshow(np.ma.masked_where(wo == 0, wo),
-                  origin="lower", cmap="Blues", vmin=0, vmax=1,
-                  alpha=0.80, interpolation="nearest")
-        # BET-only
-        bo = bet_only[:, :, z].T.astype(np.float32)
-        ax.imshow(np.ma.masked_where(bo == 0, bo),
-                  origin="lower", cmap="Reds", vmin=0, vmax=1,
-                  alpha=0.80, interpolation="nearest")
+                      vmin=0, vmax=t1w_max, interpolation="nearest")
+        ax.imshow(np.ma.masked_where(ext_slc == 0, ext_slc),
+                      origin="lower", cmap="Oranges", vmin=0, vmax=1,
+                      alpha=0.55, interpolation="nearest")
         ax.axis("off")
 
+        # Last row – Comparison
+        ax = axes[n_rows - 1, col]
+        ax.set_facecolor("black")
+        ax.imshow(t1w_slc, origin="lower", cmap="gray",
+                  vmin=0, vmax=t1w_max, alpha=0.25, interpolation="nearest")
+
+        
+        # any pairwise/triple overlap = grey
+        ov = any_overlap[:, :, z].T.astype(np.float32)
+        ax.imshow(np.ma.masked_where(ov == 0, ov),
+                      origin="lower", cmap="gray", vmin=0, vmax=1,
+                      alpha=0.55, interpolation="nearest")
+        # extra-only (orange)
+        eo = extra_only[:, :, z].T.astype(np.float32)
+        ax.imshow(np.ma.masked_where(eo == 0, eo),
+                      origin="lower", cmap="Oranges", vmin=0, vmax=1,
+                      alpha=0.80, interpolation="nearest")
+        # water-excl (blue)
+        we = water_excl[:, :, z].T.astype(np.float32)
+        ax.imshow(np.ma.masked_where(we == 0, we),
+                      origin="lower", cmap="Blues", vmin=0, vmax=1,
+                      alpha=0.80, interpolation="nearest")
+        # bet-excl (red)
+        be = bet_excl[:, :, z].T.astype(np.float32)
+        ax.imshow(np.ma.masked_where(be == 0, be),
+                      origin="lower", cmap="Reds", vmin=0, vmax=1,
+                      alpha=0.80, interpolation="nearest")
+       
     for row, lbl in enumerate(row_labels):
         axes[row, 0].set_ylabel(lbl, color="white", fontsize=10,
                                 rotation=90, labelpad=6)
 
     legend_patches = [
-        plt.matplotlib.patches.Patch(color="red",        label=f"BET only ({n_bonly:,} vox)"),
-        plt.matplotlib.patches.Patch(color="dodgerblue", label=f"Water only ({n_wonly:,} vox)"),
-        plt.matplotlib.patches.Patch(color="grey",       label=f"Overlap ({n_inter:,} vox)"),
-    ]
+            plt.matplotlib.patches.Patch(color="red",        label=f"BET only ({int(bet_excl.sum()):,} vox)"),
+            plt.matplotlib.patches.Patch(color="dodgerblue", label=f"Water only ({int(water_excl.sum()):,} vox)"),
+            plt.matplotlib.patches.Patch(color="darkorange",  label=f"{extra_mask_name} only ({n_eonly:,} vox)"),
+            plt.matplotlib.patches.Patch(color="grey",        label=f"Any overlap ({int(any_overlap.sum()):,} vox)"),
+        ]
+    title = (f"BET / Water / {extra_mask_name} mask comparison (MRSI grid)  |  "
+                 f"Dice BET-Water={dice:.3f}  BET-{extra_mask_name}={dice_be:.3f}  "
+                 f"Water-{extra_mask_name}={dice_we:.3f}")
+    
     title = (f"BET mask vs water mask (MRSI grid)  |  "
-             f"Dice={dice:.3f}  Jaccard={jaccard:.3f}")
+                 f"Dice={dice:.3f}  Jaccard={jaccard:.3f}")
     if active_mask_name:
         title += f"  |  Active: {active_mask_name}"
     fig.suptitle(title, color="white", fontsize=10)
-    fig.legend(handles=legend_patches, loc="lower center", ncol=3,
+    fig.legend(handles=legend_patches, loc="lower center", ncol=len(legend_patches),
                frameon=False, labelcolor="white", fontsize=9,
                bbox_to_anchor=(0.5, -0.02))
     plt.tight_layout()
