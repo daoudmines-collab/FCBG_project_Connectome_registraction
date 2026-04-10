@@ -1283,6 +1283,76 @@ def plot_total_pipeline_comparison(
     plt.tight_layout()
     plt.show()
 
+
+def plot_total_pipeline_mask_comparison(
+    sum_ras_img:          "nib.Nifti1Image",
+    t1w_bet_img:          "nib.Nifti1Image | None" = None,
+    t1w_freesurfer_img:   "nib.Nifti1Image | None" = None,
+    t1w_water_img:        "nib.Nifti1Image | None" = None,
+    subj: str = "sub-01",
+    ses:  str = "ses-01",
+    t1w_cmap: str = "gray",
+    mrs_cmap: str = "hot"):
+    """Compare Reg-17 (total pipeline) results using three different moving masks.
+
+    Columns : BET mask | FreeSurfer / atlas mask | Water mask
+    Rows    : Axial | Coronal | Sagittal (mid-slice of sum_ras_img)
+    """
+
+    def _norm(data: np.ndarray) -> np.ndarray:
+        pos = data[data > 0]
+        if pos.size == 0:
+            return data
+        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
+
+    panels = [
+        (t1w_bet_img,        "Reg-17  BET mask"),
+        (t1w_freesurfer_img, "Reg-17  FreeSurfer mask"),
+        (t1w_water_img,      "Reg-17  Water mask"),
+    ]
+    view_labels = ["Axial", "Coronal", "Sagittal"]
+
+    bg_norm = _norm(sum_ras_img.get_fdata().astype(np.float32))
+    mid     = [s // 2 for s in bg_norm.shape]
+
+    fig, axes = plt.subplots(3, 3, figsize=(15, 12), facecolor="black")
+    fig.subplots_adjust(hspace=0.06, wspace=0.04)
+
+    for col, (t1w_reg_img, title) in enumerate(panels):
+        if t1w_reg_img is None:
+            for row in range(3):
+                ax = axes[row, col]
+                ax.set_facecolor("black")
+                ax.axis("off")
+            axes[0, col].set_title(title + "\n(not available)", color="white", fontsize=9)
+            continue
+
+        t1w_norm = _norm(t1w_reg_img.get_fdata().astype(np.float32))
+        slices_bg  = [bg_norm[:, :, mid[2]],  bg_norm[:, mid[1], :],  bg_norm[mid[0], :, :]]
+        slices_t1w = [t1w_norm[:, :, mid[2]], t1w_norm[:, mid[1], :], t1w_norm[mid[0], :, :]]
+
+        for row, (s_bg, s_t1w, vl) in enumerate(zip(slices_bg, slices_t1w, view_labels)):
+            ax = axes[row, col]
+            ax.set_facecolor("black")
+            ax.imshow(s_t1w.T, origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
+                      interpolation="nearest", alpha=1.0)
+            ax.imshow(s_bg.T,  origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
+                      interpolation="nearest", alpha=0.6)
+            ax.axis("off")
+            if col == 0:
+                ax.set_ylabel(vl, color="white", fontsize=10, rotation=90, labelpad=4)
+            if row == 0:
+                ax.set_title(title, color="white", fontsize=10, pad=6)
+
+    fig.suptitle(
+        f"{subj} {ses}  –  Reg-17 total pipeline: moving-mask comparison\n"
+        f"T1w ({t1w_cmap}) + MRSI sum RAS overlay ({mrs_cmap}, \u03b1=0.6)",
+        color="white", fontsize=11, y=1.02,
+    )
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_registration_metrics(
     metrics: list,
     subj: str = "sub-01",
@@ -1672,16 +1742,18 @@ def plot_atlas_segmentation(
 # ──────────────────────────────────────────────────────────────────────────
 
 def plot_mrsi_sum_mask_contours(
-    sum_img:        "nib.Nifti1Image",
-    water_mask_img: "nib.Nifti1Image",
-    bet_mask_img:   "nib.Nifti1Image | None",
+    sum_img:              "nib.Nifti1Image",
+    water_mask_img:       "nib.Nifti1Image",
+    bet_mask_img:         "nib.Nifti1Image" ,
+    freesurfer_mask_img:  "nib.Nifti1Image" ,
     subj: str = "sub-01",
     ses:  str = "ses-01",
     n_slices: int = 7):
    
-    sum_data   = sum_img.get_fdata().astype(np.float32)
-    water_data = water_mask_img.get_fdata().astype(bool)
-    bet_data   = bet_mask_img.get_fdata().astype(bool) if bet_mask_img is not None else None
+    sum_data        = sum_img.get_fdata().astype(np.float32)
+    water_data      = water_mask_img.get_fdata().astype(bool)
+    bet_data        = bet_mask_img.get_fdata().astype(bool)        
+    freesurfer_data = freesurfer_mask_img.get_fdata().astype(bool) 
 
     nz = sum_data.shape[2]
     z_indices = np.linspace(0, nz - 1, n_slices, dtype=int)
@@ -1692,40 +1764,40 @@ def plot_mrsi_sum_mask_contours(
     if n_slices == 1:
         axes = [axes]
 
+    # Track which legend entries have already been added (by label)
+    legend_seen: set = set()
     legend_handles = []
+
+    def _add_contour(ax, binary_slice, color, label):
+        """Draw a contour and, the first time, add a legend entry."""
+        bin_f = binary_slice.astype(np.float32)
+        if bin_f.max() > 0:
+            ax.contour(bin_f, levels=[0.5], colors=[color], linewidths=1.2)
+            if label not in legend_seen:
+                legend_seen.add(label)
+                legend_handles.append(
+                    plt.matplotlib.lines.Line2D([], [], color=color,
+                                                linewidth=1.5, label=label))
+
     for ax, z in zip(axes, z_indices):
         ax.set_facecolor("black")
         slc = sum_data[:, :, z].T
         ax.imshow(slc, origin="lower", cmap="gray",
                   vmin=0, vmax=sum_max, interpolation="nearest")
 
-        # Sum signal contour (yellow)
-        sum_bin = (sum_data[:, :, z] > 0).astype(np.float32).T
-        if sum_bin.max() > 0:
-            ax.contour(sum_bin, levels=[0.5], colors=["gold"], linewidths=1.2)
-            if not legend_handles:
-                legend_handles.append(
-                    plt.matplotlib.lines.Line2D([], [], color="gold",
-                                                linewidth=1.5, label="Sum signal boundary"))
+        # Sum signal boundary (gold)
+        _add_contour(ax, (sum_data[:, :, z] > 0).T, "gold", "Sum signal boundary")
 
-        # Water mask contour (blue)
-        water_bin = water_data[:, :, z].astype(np.float32).T
-        if water_bin.max() > 0:
-            ax.contour(water_bin, levels=[0.5], colors=["deepskyblue"], linewidths=1.2)
-            if len(legend_handles) < 2:
-                legend_handles.append(
-                    plt.matplotlib.lines.Line2D([], [], color="deepskyblue",
-                                                linewidth=1.5, label="Water mask boundary"))
+        # Water mask (blue)
+        _add_contour(ax, water_data[:, :, z].T, "deepskyblue", "Water mask")
 
-        # BET mask contour (green)
+        # BET brain mask registered to MRSI space (green)
         if bet_data is not None:
-            bet_bin = bet_data[:, :, z].astype(np.float32).T
-            if bet_bin.max() > 0:
-                ax.contour(bet_bin, levels=[0.5], colors=["limegreen"], linewidths=1.2)
-                if len(legend_handles) < 3:
-                    legend_handles.append(
-                        plt.matplotlib.lines.Line2D([], [], color="limegreen",
-                                                    linewidth=1.5, label="BET brain mask boundary"))
+            _add_contour(ax, bet_data[:, :, z].T, "limegreen", "BET brain mask (reg.)")
+
+        # FreeSurfer / atlas mask registered to MRSI space (red)
+        if freesurfer_data is not None:
+            _add_contour(ax, freesurfer_data[:, :, z].T, "tomato", "FreeSurfer mask (reg.)")
 
         ax.set_title(f"z={z}", color="white", fontsize=9)
         ax.axis("off")
@@ -1896,12 +1968,12 @@ def plot_mask_coverage_comparaison(
     legend_patches = [
             plt.matplotlib.patches.Patch(color="red",        label=f"BET only ({int(bet_excl.sum()):,} vox)"),
             plt.matplotlib.patches.Patch(color="dodgerblue", label=f"Water only ({int(water_excl.sum()):,} vox)"),
-            plt.matplotlib.patches.Patch(color="darkorange",  label=f"{extra_mask_name} only ({n_eonly:,} vox)"),
+            plt.matplotlib.patches.Patch(color="darkorange",  label=f"Freesurfer mask only ({n_eonly:,} vox)"),
             plt.matplotlib.patches.Patch(color="grey",        label=f"Any overlap ({int(any_overlap.sum()):,} vox)"),
         ]
-    title = (f"BET / Water / {extra_mask_name} mask comparison (MRSI grid)  |  "
-                 f"Dice BET-Water={dice:.3f}  BET-{extra_mask_name}={dice_be:.3f}  "
-                 f"Water-{extra_mask_name}={dice_we:.3f}")
+    title = (f"BET / Water / Freesurfer mask comparison (MRSI grid)  |  "
+                 f"Dice BET-Water={dice:.3f}  BET-Freesurfer={dice_be:.3f}  "
+                 f"Water-Freesurfer={dice_we:.3f}")
     
     title = (f"BET mask vs water mask (MRSI grid)  |  "
                  f"Dice={dice:.3f}  Jaccard={jaccard:.3f}")

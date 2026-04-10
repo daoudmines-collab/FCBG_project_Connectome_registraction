@@ -6,6 +6,7 @@ import bids_structure
 
 from data_utils import (
     save_metabolite_sum,
+    save_reoriented_metabolite_sum,
     downsample_t1w_to_mrs,
     fill_mask_holes,
     rank_metabolites_by_snr,
@@ -23,7 +24,6 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR     = os.path.join(PROJECT_ROOT, "data")
 BIDS_DIR     = os.path.join(DATA_DIR, "bids")
 OUTPUT_DIR   = os.path.join(DATA_DIR, "output")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SUBJ = "sub-01"
 SES  = "ses-01"
@@ -374,21 +374,6 @@ else:
     t1w_brain_via_sum_in_gly_img = None
 
 
-#  Total pipeline registration 17 
-(t1w_brain_in_sum_ras_img,
-    brain_sum_ras_transforms,
-    final_reg_imgs,
-    metrics) = run_total_pipeline(
-    bids_dir=BIDS_DIR,
-    mrs_dir=MRS_DIR,
-    water_path=WATER_PATH,
-    t1w_ds_brain_path=T1W_DS_BRAIN_PATH,
-    t1w_ds_brain_img=t1w_ds_brain_img,
-    subj=SUBJ,
-    ses=SES,
-    output_dir=OUTPUT_DIR,
-    overwrite=False,
-    t1w_brain_mask_ds_path=_brain_mask_arg)
 
 SUM_RAS_NAME              = f"{SUBJ}_{SES}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
 SUM_RAS_PATH              = os.path.join(OUTPUT_DIR, SUM_RAS_NAME)
@@ -398,7 +383,10 @@ T1W_BRAIN_IN_SUM_RAS_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainT1wInSumRAS_T1w
 T1W_BRAIN_IN_SUM_RAS_PATH = os.path.join(OUTPUT_DIR, T1W_BRAIN_IN_SUM_RAS_NAME)
 FINAL_REG_DIR             = os.path.join(OUTPUT_DIR, "final_reg")
 
-sum_ras_img = nib.load(SUM_RAS_PATH) if os.path.exists(SUM_RAS_PATH) else None
+
+save_reoriented_metabolite_sum(
+    bids_dir=BIDS_DIR, ses=SES, out_dir=OUTPUT_DIR, overwrite=False, subjects=[SUBJ])
+sum_ras_img = nib.load(SUM_RAS_PATH) 
 
 # Registration 18 t1w resampled to water vis ANTS with mask provided
 
@@ -431,36 +419,101 @@ t1w_in_water_img, t1w_water_transforms = register_t1w_to_mrsi_weighted(
 )
 
 
-# BET brain mask to  MRSI space (Reg-15 brain to sum forward transform)
+# BET brain mask to  MRSI space (Reg-17 brain to sum forward transform)
 
 BET_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainMaskReg_T1w.nii.gz"
 BET_MASK_REG_PATH = os.path.join(OUTPUT_DIR, BET_MASK_REG_NAME)
 
 # freesurfer brain mask to  MRSI space (Reg-15 brain to sum forward transform)
-FREESURFER_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-UNIDEND_T1w_brainatlasmore_mask.nii"
+
+FREESURFER_MASK_SRC_NAME = f"{SUBJ}_{SES}_acq-UNIDEND_T1w_brainatlasmore_mask.nii"
+FREESURFER_MASK_SRC_PATH = os.path.join(OUTPUT_DIR, FREESURFER_MASK_SRC_NAME)
+
+FREESURFER_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-FreesurferMaskReg_T1w.nii.gz"
 FREESURFER_MASK_REG_PATH = os.path.join(OUTPUT_DIR, FREESURFER_MASK_REG_NAME)
 
+WATER_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-WaterMaskReg_mrsi.nii.gz"
+WATER_MASK_REG_PATH = os.path.join(OUTPUT_DIR, WATER_MASK_REG_NAME)
+
+# Use SUM_RAS_PATH as reference: it is now computed above, and is the same space
+# that Reg-17 registers into, so the masks are in the correct grid.
 bet_mask_reg_img = apply_transform(
         in_path=T1W_BRAIN_MASK_PATH,
-        ref_path=SUM_PATH,
+        ref_path=SUM_RAS_PATH,
         transform_path=brain_sum_transforms[0],
         out_path=BET_MASK_REG_PATH,
         overwrite=False)
 
 freesurfer_mask_reg_img = apply_transform(
-        in_path=T1W_BRAIN_MASK_PATH,
-        ref_path=SUM_PATH,
+        in_path=FREESURFER_MASK_SRC_PATH,
+        ref_path=SUM_RAS_PATH,
         transform_path=brain_sum_transforms[0],
         out_path=FREESURFER_MASK_REG_PATH,
         overwrite=False)
 
 water_mask_reg_img = apply_transform(
         in_path=WATER_MASK_PATH,
-        ref_path=SUM_PATH,
+        ref_path=SUM_RAS_PATH,
         transform_path=brain_sum_transforms[0],
-        out_path=FREESURFER_MASK_REG_PATH,
+        out_path=WATER_MASK_REG_PATH,
         overwrite=False)
 
+
+
+# Reg-17a – Total pipeline with BET brain mask (moving mask)
+# sum_ras_path is passed in so the pipeline skips recomputing AllMetabSumRAS.
+(t1w_brain_in_sum_ras_img_bet_mask,
+    brain_sum_ras_transforms_bet_mask,
+    final_reg_imgs_bet_mask,
+    metrics) = run_total_pipeline(
+    mrs_dir=MRS_DIR,
+    water_path=WATER_PATH,
+    t1w_ds_brain_path=T1W_DS_BRAIN_PATH,
+    t1w_ds_brain_img=t1w_ds_brain_img,
+    subj=SUBJ,
+    ses=SES,
+    output_dir=OUTPUT_DIR,
+    sum_ras_path=SUM_RAS_PATH,
+    overwrite=False,
+    t1w_brain_mask_ds_path=_brain_mask_arg,
+    out_suffix="")
+
+# Downsample the FreeSurfer atlas mask to the MRSI-DS voxel grid
+# (required as ANTs moving mask: must match the moving image resolution)
+FREESURFER_MASK_DS_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-FreesurferMaskDS_T1w.nii.gz"
+FREESURFER_MASK_DS_PATH = os.path.join(OUTPUT_DIR, FREESURFER_MASK_DS_NAME)
+if not os.path.exists(FREESURFER_MASK_DS_PATH) and os.path.exists(FREESURFER_MASK_SRC_PATH):
+    _fs_img = nib.load(FREESURFER_MASK_SRC_PATH)
+    _fs_ds  = resample_from_to(_fs_img, mrs_example, order=0)
+    _fs_ds  = nib.Nifti1Image(np.array(_fs_ds.dataobj, dtype=np.uint8),
+                              _fs_ds.affine, _fs_ds.header)
+    nib.save(_fs_ds, FREESURFER_MASK_DS_PATH)
+    print(f"  [fs-mask-ds] saved {FREESURFER_MASK_DS_NAME}")
+_fs_mask_arg = FREESURFER_MASK_DS_PATH if os.path.exists(FREESURFER_MASK_DS_PATH) else None
+
+# Reg-17b – Total pipeline with FreeSurfer atlas mask (moving mask)
+# out_suffix="-FSMask" writes to a distinct filename so it does not
+# collide with the BET variant above.
+(t1w_brain_in_sum_ras_img_freesurfer_mask,
+    brain_sum_ras_transforms_freesurfer_mask,
+    final_reg_imgs_freesurfer_mask,
+    metrics_freesurfer_mask) = run_total_pipeline(
+    mrs_dir=MRS_DIR,
+    water_path=WATER_PATH,
+    t1w_ds_brain_path=T1W_DS_BRAIN_PATH,
+    t1w_ds_brain_img=t1w_ds_brain_img,
+    subj=SUBJ,
+    ses=SES,
+    output_dir=OUTPUT_DIR,
+    sum_ras_path=SUM_RAS_PATH,
+    overwrite=False,
+    t1w_brain_mask_ds_path=_fs_mask_arg,
+    out_suffix="-FSMask")
+
+# Convenient aliases kept for backward compatibility with notebook imports
+t1w_brain_in_sum_ras_img = t1w_brain_in_sum_ras_img_bet_mask
+brain_sum_ras_transforms  = brain_sum_ras_transforms_bet_mask
+final_reg_imgs            = final_reg_imgs_bet_mask
 # # ──────────────────────────────────────────────────────────────────────────
 # # Section 25 – Registration comparison dict (T1w images in MRSI space)
 # # ──────────────────────────────────────────────────────────────────────────

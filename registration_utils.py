@@ -241,22 +241,26 @@ def apply_transform(
     transform_path: str,
     out_path: str,
     interpolation: str = "Linear",
-    overwrite: bool = False):
-    """Apply a single forward transform with antsApplyTransforms."""
+    overwrite: bool = False) -> "nib.Nifti1Image | None":
+    """Apply a pre-computed ANTs transform to any NIfTI image."""
+
     if os.path.exists(out_path) and not overwrite:
-        print(f"  [apply-xfm] already exists: {out_path}")
+        print(f"  [xfm] already exists: {os.path.basename(out_path)}")
         return nib.load(out_path)
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    subprocess.run([
+    cmd = [
         "antsApplyTransforms", "-d", "3",
         "-i", in_path,
         "-r", ref_path,
         "-t", transform_path,
         "-n", interpolation,
         "-o", out_path,
-    ], check=True)
-    print(f"  [apply-xfm] saved {os.path.basename(out_path)}")
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    print(f"  [xfm] saved: {os.path.basename(out_path)}")
     return nib.load(out_path)
+
 
 def apply_transform_to_metabolite(
     mrsi_path: str,
@@ -359,7 +363,6 @@ def compute_registration_metrics(
     return records
 
 def run_total_pipeline(
-    bids_dir: str,
     mrs_dir: str,
     water_path: str,
     t1w_ds_brain_path: str,
@@ -367,14 +370,13 @@ def run_total_pipeline(
     subj: str,
     ses: str,
     output_dir: str,
+    sum_ras_path: str,
     overwrite: bool = False,
-    t1w_brain_mask_ds_path: str | None = None):
+    t1w_brain_mask_ds_path: str | None = None,
+    out_suffix: str = ""):
+  
 
-    # Step 1 – reorient metabolite sum
-    sum_ras_name = f"{subj}_{ses}_acq-OrigRes_desc-AllMetabSumRAS_mrsi.nii.gz"
-    sum_ras_path = os.path.join(output_dir, sum_ras_name)
-    save_reoriented_metabolite_sum(bids_dir, ses=ses, out_dir=output_dir, overwrite=overwrite, subjects=[subj])
-    sum_ras_img = nib.load(sum_ras_path) if os.path.exists(sum_ras_path) else None
+    sum_ras_img = nib.load(sum_ras_path) 
 
     # Step 2 – RAS canonical reoriented water signal
     water_ras_name = f"{subj}_{ses}_desc-WaterSignalRAS_mrsi.nii.gz"
@@ -390,7 +392,8 @@ def run_total_pipeline(
     fill_mask_holes(water_ras_path, out_mask_path=water_ras_mask_path, overwrite=overwrite)
 
     # Step 3  Reg-17: skull stripped DS T1w to reoriented sum, water-masked
-    t1w_brain_in_sum_ras_name = f"{subj}_{ses}_acq-MRSIres_desc-BrainT1wInSumRAS_T1w.nii.gz"
+    _desc = f"BrainT1wInSumRAS{out_suffix}"
+    t1w_brain_in_sum_ras_name = f"{subj}_{ses}_acq-MRSIres_desc-{_desc}_T1w.nii.gz"
     t1w_brain_in_sum_ras_path = os.path.join(output_dir, t1w_brain_in_sum_ras_name)
     t1w_brain_in_sum_ras_xfm  = t1w_brain_in_sum_ras_path.replace(".nii.gz", "_fwdtransform.mat")
     if sum_ras_img is not None:
