@@ -426,7 +426,7 @@ BET_MASK_REG_PATH = os.path.join(OUTPUT_DIR, BET_MASK_REG_NAME)
 
 # freesurfer brain mask to  MRSI space (Reg-15 brain to sum forward transform)
 
-FREESURFER_MASK_SRC_NAME = f"{SUBJ}_{SES}_acq-UNIDEND_T1w_brainatlasmore_mask.nii"
+FREESURFER_MASK_SRC_NAME = f"{SUBJ}_{SES}_acq-UNIDEND_T1w_brainmask_synthstrip.nii"
 FREESURFER_MASK_SRC_PATH = os.path.join(OUTPUT_DIR, FREESURFER_MASK_SRC_NAME)
 
 FREESURFER_MASK_REG_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-FreesurferMaskReg_T1w.nii.gz"
