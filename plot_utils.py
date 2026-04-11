@@ -80,7 +80,7 @@ def plot_support_mask(
     t1_img  = nib.as_closest_canonical(nib.load(t1w_path))
     mrs_img = nib.as_closest_canonical(nib.load(mrs_path))
 
-    mask_data = (mrs_img.get_fdata() > 0).astype(np.float32)
+    mask_data = (mrs_img.get_fdata() > 0).astype(float)
     mask_img  = nib.Nifti1Image(mask_data, mrs_img.affine, mrs_img.header)
     mask_res  = resample_from_to(mask_img, t1_img, order=0)
 
@@ -295,8 +295,8 @@ def plot_registration_comparison(
     # Resample unregistered MRSI to T1w grid for the "before" column
     mrsi_unreg_on_t1w = resample_from_to(mrsi_img_unreg, t1w_img, order=1)
     cols_data = [
-        (_norm(mrsi_unreg_on_t1w.get_fdata().astype(np.float32)), "MRSI\n(no registration)"),
-        (_norm(mrsi_reg_img.get_fdata().astype(np.float32)),       "MRSI\n+ registered"),
+        (_norm(mrsi_unreg_on_t1w.get_fdata()), "MRSI\n(no registration)"),
+        (_norm(mrsi_reg_img.get_fdata()),       "MRSI\n+ registered"),
     ]
 
     view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
@@ -356,8 +356,8 @@ def plot_registration_methods_comparison(
     fig, axes = plt.subplots(3, 2, figsize=(10, 11), facecolor="black")
 
     for col, (t1w_ref, mrsi_reg, col_lbl) in enumerate(cols_data):
-        t1w_norm = _norm(t1w_ref.get_fdata().astype(np.float32))
-        mrs_norm = _norm(mrsi_reg.get_fdata().astype(np.float32))
+        t1w_norm = _norm(t1w_ref.get_fdata())
+        mrs_norm = _norm(mrsi_reg.get_fdata())
         mid = [s // 2 for s in t1w_norm.shape]
         t1w_slices = _slices(t1w_norm, mid)
         mrs_slices = _slices(mrs_norm, mid)
@@ -405,9 +405,9 @@ def plot_registration_target_comparison(
         ]
 
     cols_data = [
-        (_norm(mrsi_reg_bestsnr_img.get_fdata().astype(np.float32)),
+        (_norm(mrsi_reg_bestsnr_img.get_fdata()),
          f"{bestsnr_label} (moving) to DS T1w (fixed)"),
-        (_norm(mrsi_reg_sum_img.get_fdata().astype(np.float32)),
+        (_norm(mrsi_reg_sum_img.get_fdata()),
          f"{sum_label} (moving) to DS T1w (fixed)"),
     ]
 
@@ -458,11 +458,11 @@ def plot_coverage_registration_comparison(
         return [vol[:, :, mid[2]], vol[:, mid[1], :], vol[mid[0], :, :]]
 
     cols_data = [
-        (_norm(mrsi_cov_reg_img.get_fdata().astype(np.float32)),
+        (_norm(mrsi_cov_reg_img.get_fdata()),
          f"{cov_label}\n(own transform)"),
-        (_norm(mrsi_gly_reg_img.get_fdata().astype(np.float32)),
+        (_norm(mrsi_gly_reg_img.get_fdata()),
          f"{gly_label}\n(own transform)"),
-        (_norm(mrsi_gly_via_sum_img.get_fdata().astype(np.float32)),
+        (_norm(mrsi_gly_via_sum_img.get_fdata()),
          f"{gly_label}\n(sum's transform)"),
     ]
 
@@ -500,9 +500,9 @@ def plot_coverage_registration_comparison(
     print(f"\n  {'Strategy':<36}  {'Mean in brain':>14}  {'CC with T1w':>12}")
     print(f"  {'-'*66}")
     for label, d in [
-        (f"{cov_label} — own transform",     _norm(mrsi_cov_reg_img.get_fdata().astype(np.float32))),
-        (f"{gly_label} — own transform",     _norm(mrsi_gly_reg_img.get_fdata().astype(np.float32))),
-        (f"{gly_label} — sum's transform",   _norm(mrsi_gly_via_sum_img.get_fdata().astype(np.float32))),
+        (f"{cov_label} — own transform",     _norm(mrsi_cov_reg_img.get_fdata())),
+        (f"{gly_label} — own transform",     _norm(mrsi_gly_reg_img.get_fdata())),
+        (f"{gly_label} — sum's transform",   _norm(mrsi_gly_via_sum_img.get_fdata())),
     ]:
         cc = float(np.corrcoef(d[brain].ravel(), t1w_norm[brain].ravel())[0, 1])
         print(f"  {label:<36}  {d[brain].mean():>14.4f}  {cc:>12.4f}")
@@ -521,12 +521,12 @@ def compare_registration_coverage(
     sum_label: str = "Sum reg"):
 
     d_bestsnr = _norm(mrsi_reg_bestsnr_img.get_fdata())
-    d_sum     = _norm(mrsi_reg_sum_img.get_fdata().astype(np.float32))
+    d_sum     = _norm(mrsi_reg_sum_img.get_fdata())
     diff      = d_bestsnr - d_sum   # positive = more MRSI signal in best-SNR reg
 
-    t1w_data    = t1w_ds_img.get_fdata().astype(np.float32)
+    t1w_data    = t1w_ds_img.get_fdata()
     fixed_ants  = _nib_to_ants(t1w_data, t1w_ds_img)
-    mask_f32    = mrsi_mask.astype(np.float32)
+    mask_f32    = mrsi_mask.astype(float)
     moving_mask = _nib_to_ants(mask_f32, mrsi_img)
 
     def _warp_mask(transforms):
@@ -559,7 +559,7 @@ def compare_registration_coverage(
     m_sum  = _metrics(d_sum)
 
     # ── figure ────────────────────────────────────────────────────────────────
-    t1w_norm = _norm(t1w_ds_img.get_fdata().astype(np.float32))
+    t1w_norm = _norm(t1w_ds_img.get_fdata())
     mid = [s // 2 for s in t1w_norm.shape]
 
     diff_abs_max = float(np.abs(diff).max()) or 1.0
@@ -590,9 +590,9 @@ def compare_registration_coverage(
                        vmin=-diff_abs_max, vmax=diff_abs_max,
                        alpha=0.85, interpolation="nearest")
         # Two mask contours: orange = bestsnr_label reg boundary, cyan = sum_label boundary
-        ax.contour(_slices_at(mask_bestsnr.astype(np.float32), mid)[row].T,
+        ax.contour(_slices_at(mask_bestsnr.astype(float), mid)[row].T,
                    levels=[0.5], colors=["#f4a261"], linewidths=1.0, origin="lower")
-        ax.contour(_slices_at(mask_sum.astype(np.float32), mid)[row].T,
+        ax.contour(_slices_at(mask_sum.astype(float), mid)[row].T,
                    levels=[0.5], colors=["cyan"], linewidths=1.0, origin="lower")
         ax.axis("off")
         ax.set_ylabel(vl, color="white", fontsize=9, rotation=90, labelpad=4)
@@ -684,11 +684,11 @@ def plot_sum_registration_comparison(
 
     cols_data = [
         (
-            _norm(mrsi_reg_ds_img.get_fdata().astype(np.float32)),
+            _norm(mrsi_reg_ds_img.get_fdata()),
             f"{bestsnr_label} — own transform\n(optimizer used Gly as moving image)",
         ),
         (
-            _norm(mrsi_gly_via_sum_img.get_fdata().astype(np.float32)),
+            _norm(mrsi_gly_via_sum_img.get_fdata()),
             f"{bestsnr_label} — sum's transform\n(optimizer used sum as moving image)",
         ),
     ]
@@ -723,7 +723,7 @@ def plot_sum_registration_comparison(
     plt.show()
 
     # Print alignment quality metrics for both
-    t_norm = _norm(t1w_ds_img.get_fdata().astype(np.float32))
+    t_norm = _norm(t1w_ds_img.get_fdata())
     brain  = t_norm > 0.05
     print(f"  {'':30}  {'mean in brain':>14}  {'CC with T1w':>12}")
     print(f"  {'-'*58}")
@@ -731,7 +731,7 @@ def plot_sum_registration_comparison(
         (f"{bestsnr_label} — own transform",  mrsi_reg_ds_img),
         (f"{bestsnr_label} — sum's transform", mrsi_gly_via_sum_img),
     ]:
-        d  = _norm(img.get_fdata().astype(np.float32))
+        d  = _norm(img.get_fdata())
         cc = float(np.corrcoef(d[brain].ravel(), t_norm[brain].ravel())[0, 1])
         print(f"  {label:<30}  {d[brain].mean():>14.4f}  {cc:>12.4f}")
 
@@ -756,9 +756,9 @@ def plot_water_mask_comparison(
             vol[mid[0], :, :],   # sagittal
         ]
 
-    rows_data  = [_slices(raw_mask.astype(np.float32)),
-                  _slices(filled_mask.astype(np.float32)),
-                  _slices(hole_map.astype(np.float32))]
+    rows_data  = [_slices(raw_mask.astype(float)),
+                  _slices(filled_mask.astype(float)),
+                  _slices(hole_map.astype(float))]
     row_labels = ["Raw mask", "Filled mask", "Recovered holes"]
     cmaps      = ["Blues",    "Greens",      "Reds"]
     view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
@@ -1105,8 +1105,8 @@ def plot_inverse_registration_panels(
     fig.subplots_adjust(hspace=0.08, wspace=0.04)
 
     for col, (bg_img, t1w_reg_img, col_title, bg_label) in enumerate(views):
-        bg_norm  = _norm(bg_img.get_fdata().astype(np.float32))
-        t1w_norm = _norm(t1w_reg_img.get_fdata().astype(np.float32))
+        bg_norm  = _norm(bg_img.get_fdata())
+        t1w_norm = _norm(t1w_reg_img.get_fdata())
         mid = [s // 2 for s in bg_norm.shape]
 
         slices_bg  = [bg_norm[:, :, mid[2]], bg_norm[:, mid[1], :], bg_norm[mid[0], :, :]]
@@ -1157,7 +1157,7 @@ def compare_inverse_registration_pair(
     slices_bg = [bg_norm[:, :, mid[2]], bg_norm[:, mid[1], :], bg_norm[mid[0], :, :]]
 
     for col, (t1w_img, col_title) in enumerate(views):
-        t1w_norm = _norm(t1w_img.get_fdata().astype(np.float32))
+        t1w_norm = _norm(t1w_img.get_fdata())
         slices_t1w = [t1w_norm[:, :, mid[2]], t1w_norm[:, mid[1], :], t1w_norm[mid[0], :, :]]
 
         for row, (s_bg, s_t1w, vl) in enumerate(zip(slices_bg, slices_t1w, view_labels)):
@@ -1209,8 +1209,8 @@ def plot_total_pipeline_comparison(
             axes[0, col].set_title(title + "\n(not available)", color="white", fontsize=9)
             continue
 
-        bg  = _norm(bg_img.get_fdata().astype(np.float32))
-        t1w = _norm(t1w_reg_img.get_fdata().astype(np.float32))
+        bg  = _norm(bg_img.get_fdata())
+        t1w = _norm(t1w_reg_img.get_fdata())
         mid = [s // 2 for s in bg.shape]
         slices_bg  = [bg[:, :, mid[2]], bg[:, mid[1], :], bg[mid[0], :, :]]
         slices_t1w = [t1w[:, :, mid[2]], t1w[:, mid[1], :], t1w[mid[0], :, :]]
@@ -1259,7 +1259,7 @@ def plot_total_pipeline_mask_comparison(
     ]
     view_labels = ["Axial", "Coronal", "Sagittal"]
 
-    bg_norm = _norm(sum_ras_img.get_fdata().astype(np.float32))
+    bg_norm = _norm(sum_ras_img.get_fdata())
     mid     = [s // 2 for s in bg_norm.shape]
 
     fig, axes = plt.subplots(3, 3, figsize=(15, 12), facecolor="black")
@@ -1274,7 +1274,7 @@ def plot_total_pipeline_mask_comparison(
             axes[0, col].set_title(title + "\n(not available)", color="white", fontsize=9)
             continue
 
-        t1w_norm = _norm(t1w_reg_img.get_fdata().astype(np.float32))
+        t1w_norm = _norm(t1w_reg_img.get_fdata())
         slices_bg  = [bg_norm[:, :, mid[2]],  bg_norm[:, mid[1], :],  bg_norm[mid[0], :, :]]
         slices_t1w = [t1w_norm[:, :, mid[2]], t1w_norm[:, mid[1], :], t1w_norm[mid[0], :, :]]
 
@@ -1545,11 +1545,12 @@ def plot_pipeline_metrics_comparison(
     ax_sc = axes[1, 0]
     ax_sc.set_facecolor(PAN)
     for na, nb, ma, mb in zip(ncc_a, ncc_b, nmi_a, nmi_b):
-        ax_sc.plot([na, nb], [ma, mb], color="white", linewidth=0.5, alpha=0.2, zorder=2)
-    ax_sc.scatter(ncc_a, nmi_a, c=COLOR_A, s=60, zorder=3,
-                  edgecolors="white", linewidths=0.3, label=label_a, alpha=0.9)
-    ax_sc.scatter(ncc_b, nmi_b, c=COLOR_B, s=60, marker="s", zorder=3,
+        ax_sc.plot([na, nb], [ma, mb], color="white", linewidth=0.8, alpha=0.35, zorder=2)
+    # Draw FreeSurfer first (behind), then BET on top so both are always visible
+    ax_sc.scatter(ncc_b, nmi_b, c=COLOR_B, s=65, marker="s", zorder=3,
                   edgecolors="white", linewidths=0.3, label=label_b, alpha=0.9)
+    ax_sc.scatter(ncc_a, nmi_a, c=COLOR_A, s=75, zorder=4,
+                  edgecolors="white", linewidths=0.4, label=label_a, alpha=0.9)
     ax_sc.axvline(0, color="white", linestyle="--", linewidth=0.7, alpha=0.4)
     ax_sc.set_xlabel("NCC", color=TXT, fontsize=9)
     ax_sc.set_ylabel("NMI", color=TXT, fontsize=9)
@@ -1560,33 +1561,47 @@ def plot_pipeline_metrics_comparison(
         spine.set_edgecolor(GREY)
     ax_sc.legend(facecolor="#222222", labelcolor="white", fontsize=8)
 
-    # bottom-right: delta bar chart (FreeSurfer − BET)
+    # bottom-right: normalised delta bar chart (FreeSurfer − BET)
+    # Each metric is normalised by its own maximum absolute delta so that
+    # even small differences are visible and the two metrics share the same
+    # [-1, +1] axis without arbitrary hand-tuned multipliers.
     ax_d = axes[1, 1]
     ax_d.set_facecolor(PAN)
     delta_ncc = ncc_b - ncc_a
     delta_nmi = nmi_b - nmi_a
-    delta_snr = snr_b - snr_a
     order_d   = np.argsort(delta_ncc)
     _yd       = np.arange(len(order_d))
     _ld       = [labels[i] for i in order_d]
 
-    ax_d.barh(_yd - 0.25, delta_ncc[order_d], height=0.25, color=COLOR_A,
-              label="ΔNCC", alpha=0.9, zorder=2)
-    ax_d.barh(_yd,         delta_nmi[order_d] * 10, height=0.25, color=COLOR_B,
-              label="ΔNMI ×10", alpha=0.9, zorder=2)
-    ax_d.barh(_yd + 0.25, delta_snr[order_d] * 0.01, height=0.25, color="#90e0b0",
-              label="ΔSNR ×0.01", alpha=0.9, zorder=2)
+    ncc_max  = float(np.abs(delta_ncc).max()) + 1e-10
+    nmi_max  = float(np.abs(delta_nmi).max()) + 1e-10
+    dncc_n   = delta_ncc[order_d] / ncc_max
+    dnmi_n   = delta_nmi[order_d] / nmi_max
+
+    ax_d.barh(_yd - 0.2, dncc_n, height=0.35, color=COLOR_A,
+              label=f"ΔNCC  (max={ncc_max - 1e-10:.4f})", alpha=0.9, zorder=2)
+    ax_d.barh(_yd + 0.2, dnmi_n, height=0.35, color=COLOR_B,
+              label=f"ΔNMI  (max={nmi_max - 1e-10:.5f})", alpha=0.9, zorder=2)
     ax_d.axvline(0, color="white", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax_d.set_xlim(-1.35, 1.35)
     ax_d.set_yticks(_yd)
     ax_d.set_yticklabels(_ld, color=TXT, fontsize=7.5)
-    ax_d.set_xlabel(f"Δ ({label_b} − {label_a})\npositive = FreeSurfer better",
-                    color=TXT, fontsize=9)
-    ax_d.set_title("Per-metabolite pipeline delta", color=TXT, fontsize=10, pad=6)
+    ax_d.set_xlabel(
+        f"Normalised Δ ({label_b} − {label_a})\n"
+        "+1 = max improvement   ·   −1 = max regression",
+        color=TXT, fontsize=9)
+    ax_d.set_title("Per-metabolite pipeline delta  (normalised)", color=TXT, fontsize=10, pad=6)
     ax_d.tick_params(colors=TXT, labelsize=8)
     ax_d.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
     for spine in ax_d.spines.values():
         spine.set_edgecolor(GREY)
-    ax_d.legend(facecolor="#222222", labelcolor="white", fontsize=8)
+    ax_d.legend(facecolor="#222222", labelcolor="white", fontsize=8, loc="lower right")
+    # Annotate when both pipelines are practically equivalent
+    if ncc_max - 1e-10 < 1e-4 and nmi_max - 1e-10 < 1e-6:
+        ax_d.text(0, len(_yd) / 2, "≈ equivalent pipelines",
+                  ha="center", va="center", color="white", fontsize=11,
+                  alpha=0.65, style="italic",
+                  bbox=dict(facecolor="#333333", edgecolor="none", alpha=0.55, pad=4))
 
     fig.suptitle(
         f"{subj}  {ses}  –  Pipeline comparison: {label_a} vs {label_b}\n"
@@ -1626,7 +1641,7 @@ def plot_final_registration_mosaic(
     n    = len(reg_mrsi_imgs)
     rows = (n + cols - 1) // cols
 
-    t1w_data = t1w_img.get_fdata().astype(np.float32)
+    t1w_data = t1w_img.get_fdata()
     pos      = t1w_data[t1w_data > 0]
     t1w_norm = np.clip(t1w_data / (float(np.nanpercentile(pos, 99)) if pos.size else 1.0), 0, 1)
 
@@ -1638,7 +1653,7 @@ def plot_final_registration_mosaic(
     axes = np.array(axes).reshape(-1)
 
     for ax, (label, img) in zip(axes, reg_mrsi_imgs.items()):
-        mrsi_data = img.get_fdata().astype(np.float32)
+        mrsi_data = img.get_fdata()
         # pick axial slice with most signal
         sig_per_z = (mrsi_data > 0).sum(axis=(0, 1))
         best_z    = int(sig_per_z.argmax()) if sig_per_z.max() > 0 else t1w_norm.shape[2] // 2
@@ -1865,7 +1880,7 @@ def plot_mrsi_sum_mask_contours(
     ses:  str = "ses-01",
     n_slices: int = 7):
    
-    sum_data        = sum_img.get_fdata().astype(np.float32)
+    sum_data        = sum_img.get_fdata()
     water_data      = water_mask_img.get_fdata().astype(bool)
     bet_data        = bet_mask_img.get_fdata().astype(bool)        
     freesurfer_data = freesurfer_mask_img.get_fdata().astype(bool) 
@@ -1885,7 +1900,7 @@ def plot_mrsi_sum_mask_contours(
 
     def _add_contour(ax, binary_slice, color, label):
         """Draw a contour and, the first time, add a legend entry."""
-        bin_f = binary_slice.astype(np.float32)
+        bin_f = binary_slice.astype(float)
         if bin_f.max() > 0:
             ax.contour(bin_f, levels=[0.5], colors=[color], linewidths=1.2)
             if label not in legend_seen:
@@ -1936,7 +1951,7 @@ def plot_mask_coverage_comparaison(
     n_slices: int = 7):
     bet_data   = bet_mask_img.get_fdata().astype(bool)
     water_data = water_mask_img.get_fdata().astype(bool)
-    t1w_data   = t1w_ds_img.get_fdata().astype(np.float32)
+    t1w_data   = t1w_ds_img.get_fdata()
     
     extra_data = extra_mask_img.get_fdata().astype(bool)
 
@@ -2012,8 +2027,8 @@ def plot_mask_coverage_comparaison(
 
     for col, z in enumerate(z_indices):
         t1w_slc = t1w_data[:, :, z].T
-        bet_slc = bet_data[:, :, z].T.astype(np.float32)
-        wat_slc = water_data[:, :, z].T.astype(np.float32)
+        bet_slc = bet_data[:, :, z].T.astype(float)
+        wat_slc = water_data[:, :, z].T.astype(float)
 
         # Row 0 – BET mask on T1w
         ax = axes[0, col]
@@ -2038,7 +2053,7 @@ def plot_mask_coverage_comparaison(
 
        
         # Row 2 – Extra mask on T1w
-        ext_slc = extra_data[:, :, z].T.astype(np.float32)
+        ext_slc = extra_data[:, :, z].T.astype(float)
         ax = axes[2, col]
         ax.set_facecolor("black")
         ax.imshow(t1w_slc, origin="lower", cmap="gray",
@@ -2056,22 +2071,22 @@ def plot_mask_coverage_comparaison(
 
         
         # any pairwise/triple overlap = grey
-        ov = any_overlap[:, :, z].T.astype(np.float32)
+        ov = any_overlap[:, :, z].T.astype(float)
         ax.imshow(np.ma.masked_where(ov == 0, ov),
                       origin="lower", cmap="gray", vmin=0, vmax=1,
                       alpha=0.55, interpolation="nearest")
         # extra-only (orange)
-        eo = extra_only[:, :, z].T.astype(np.float32)
+        eo = extra_only[:, :, z].T.astype(float)
         ax.imshow(np.ma.masked_where(eo == 0, eo),
                       origin="lower", cmap="Oranges", vmin=0, vmax=1,
                       alpha=0.80, interpolation="nearest")
         # water-excl (blue)
-        we = water_excl[:, :, z].T.astype(np.float32)
+        we = water_excl[:, :, z].T.astype(float)
         ax.imshow(np.ma.masked_where(we == 0, we),
                       origin="lower", cmap="Blues", vmin=0, vmax=1,
                       alpha=0.80, interpolation="nearest")
         # bet-excl (red)
-        be = bet_excl[:, :, z].T.astype(np.float32)
+        be = bet_excl[:, :, z].T.astype(float)
         ax.imshow(np.ma.masked_where(be == 0, be),
                       origin="lower", cmap="Reds", vmin=0, vmax=1,
                       alpha=0.80, interpolation="nearest")
@@ -2109,7 +2124,7 @@ def _compute_nmi_vs_reference(
     reg_imgs: dict,
     reference_img: nib.Nifti1Image):
    
-    ref_data = reference_img.get_fdata().astype(np.float32)
+    ref_data = reference_img.get_fdata()
     ref_mask = ref_data > 0
     n_ref   = int(ref_mask.sum())
     records = []
@@ -2119,9 +2134,9 @@ def _compute_nmi_vs_reference(
         # Resample to reference grid if geometries differ
         if img.shape != reference_img.shape or not np.allclose(img.affine, reference_img.affine, atol=1e-3):
             img_r = resample_from_to(img, reference_img, order=1)
-            mv_data = img_r.get_fdata().astype(np.float32)
+            mv_data = img_r.get_fdata()
         else:
-            mv_data = img.get_fdata().astype(np.float32)
+            mv_data = img.get_fdata()
         overlap  = ref_mask & (mv_data > 0)
         coverage = float(overlap.sum()) / n_ref if n_ref > 0 else 0.0
         nmi = _mutual_information(ref_data[overlap], mv_data[overlap]) if overlap.sum() > 10 else 0.0
@@ -2141,7 +2156,7 @@ def plot_multi_reg_nmi_comparison(
         print("[reg-nmi] nothing to plot — reg_imgs is empty or all None.")
         return
 
-    water_data = water_img.get_fdata().astype(np.float32)
+    water_data = water_img.get_fdata()
     mid_z      = water_data.shape[2] // 2
     wsl        = water_data[:, :, mid_z]
     vmax_w     = float(np.nanpercentile(wsl[wsl > 0], 99)) if (wsl > 0).any() else 1.0
@@ -2172,9 +2187,9 @@ def plot_multi_reg_nmi_comparison(
         # Resample to water grid for display
         if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
             img_r = resample_from_to(img, water_img, order=1)
-            t1w_data = img_r.get_fdata().astype(np.float32)
+            t1w_data = img_r.get_fdata()
         else:
-            t1w_data = img.get_fdata().astype(np.float32)
+            t1w_data = img.get_fdata()
 
         t1w_sl = t1w_data[:, :, mid_z]
         vmax_t = float(np.nanpercentile(t1w_sl[t1w_sl > 0], 99)) if (t1w_sl > 0).any() else 1.0
@@ -2262,7 +2277,7 @@ def plot_tissue_metabolite_metrics(
     BG, PAN, GREY, TXT = "#0d0d0d", "#1a1a1a", "#444444", "white"
 
     # ── Common MRSI grid reference ────────────────────────────────────────
-    water_data = water_img.get_fdata().astype(np.float32)
+    water_data = water_img.get_fdata()
     water_mask = water_data > 0
     mid_z      = water_data.shape[2] // 2
     wsl        = water_data[:, :, mid_z]
@@ -2271,11 +2286,11 @@ def plot_tissue_metabolite_metrics(
     def _get_slice(img):
         if img is None:
             return None
-        d = img.get_fdata().astype(np.float32)
+        d = img.get_fdata()
         # clip negatives from linear interpolation
         d = np.clip(d, 0, None)
         if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
-            d = resample_from_to(img, water_img, order=1).get_fdata().astype(np.float32)
+            d = resample_from_to(img, water_img, order=1).get_fdata()
             d = np.clip(d, 0, None)
         return d[:, :, mid_z]
 
@@ -2287,10 +2302,10 @@ def plot_tissue_metabolite_metrics(
     def _flat(img):
         if img is None:
             return None
-        d = img.get_fdata().astype(np.float32)
+        d = img.get_fdata()
         d = np.clip(d, 0, None)
         if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
-            d = resample_from_to(img, water_img, order=1).get_fdata().astype(np.float32)
+            d = resample_from_to(img, water_img, order=1).get_fdata()
             d = np.clip(d, 0, None)
         return d[water_mask]
 
@@ -2311,9 +2326,9 @@ def plot_tissue_metabolite_metrics(
         if img is None:
             continue
         if img.shape != water_img.shape or not np.allclose(img.affine, water_img.affine, atol=1e-3):
-            d = resample_from_to(img, water_img, order=1).get_fdata().astype(np.float32)
+            d = resample_from_to(img, water_img, order=1).get_fdata()
         else:
-            d = img.get_fdata().astype(np.float32)
+            d = img.get_fdata()
         d = np.clip(d, 0, None)
         vals = d[water_mask]
 

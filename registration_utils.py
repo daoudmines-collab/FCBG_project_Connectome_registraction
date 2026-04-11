@@ -301,7 +301,8 @@ def apply_transform_all_metabolites(
     out_dir: str,
     subj: str = "sub-01",
     ses: str = "ses-01",
-    overwrite: bool = False):
+    overwrite: bool = False,
+    out_suffix: str = ""):
    
     maps = sorted(
         f for f in os.listdir(mrs_dir)
@@ -312,7 +313,7 @@ def apply_transform_all_metabolites(
 
     for fname in maps:
         label    = metabolite_name(fname)
-        out_name = f"{subj}_{ses}_acq-MRSIres_desc-{label}Reg17_T1w.nii.gz"
+        out_name = f"{subj}_{ses}_acq-MRSIres_desc-{label}Reg17{out_suffix}_T1w.nii.gz"
         img = apply_transform_to_metabolite(
             mrsi_path=os.path.join(mrs_dir, fname),
             transform_path=transform_path,
@@ -419,10 +420,11 @@ def run_total_pipeline(
             subj=subj,
             ses=ses,
             overwrite=overwrite,
+            out_suffix=out_suffix,
         )
         # Also register the RAS water signal with the same transform (used as reference)
         os.makedirs(final_reg_dir, exist_ok=True)
-        water_reg_name = f"{subj}_{ses}_acq-MRSIres_desc-WaterSignalReg17_T1w.nii.gz"
+        water_reg_name = f"{subj}_{ses}_acq-MRSIres_desc-WaterSignalReg17{out_suffix}_T1w.nii.gz"
         water_reg_img = apply_transform_to_metabolite(
             mrsi_path=water_ras_path,
             transform_path=brain_sum_ras_transforms[0],
