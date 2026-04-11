@@ -1,4 +1,5 @@
 import os
+import inspect
 import ants
 import nibabel as nib
 import numpy as np
@@ -16,6 +17,22 @@ from data_utils import (
 )
 
 # Plot utilities
+
+_SAVE_DIR: str | None = None
+
+def set_figures_dir(path: str) -> None:
+    """Set the directory where all figures are auto-saved. Call once before plotting."""
+    global _SAVE_DIR
+    os.makedirs(path, exist_ok=True)
+    _SAVE_DIR = path
+
+def _auto_save(fig) -> None:
+    """Save *fig* to _SAVE_DIR using the calling function's name as filename."""
+    if _SAVE_DIR is None:
+        return
+    name = inspect.currentframe().f_back.f_code.co_name
+    out = os.path.join(_SAVE_DIR, f"{name}.png")
+    fig.savefig(out, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
 
 def _norm(data: np.ndarray) -> np.ndarray:
     """Normalise to [0, 1] using the 99th percentile of positive values."""
@@ -66,6 +83,7 @@ def plot_single_overlay(
         vmax=vmax,
         resampling_interpolation="continuous",
     )
+    _auto_save(fig)
     plt.show()
     return estimate_coverage(mrs_res, t1_img)
 
@@ -91,6 +109,7 @@ def plot_support_mask(
         display_mode="ortho",
         cut_coords=get_nonzero_com(mask_res),
     )
+    _auto_save(fig)
     plt.show()
     return estimate_coverage(mask_res, t1_img)
 
@@ -193,6 +212,7 @@ def plot_snr_ranking(
         color="white", fontsize=12, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
     # print the top-3 best
@@ -270,6 +290,7 @@ def plot_t1w_mrs_comparison(
         color="white", fontsize=12, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 def plot_registration_comparison(
@@ -326,6 +347,7 @@ def plot_registration_comparison(
         color="white", fontsize=12, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 def plot_registration_methods_comparison(
@@ -381,6 +403,7 @@ def plot_registration_methods_comparison(
         color="white", fontsize=12, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 def plot_registration_target_comparison(
@@ -437,6 +460,7 @@ def plot_registration_target_comparison(
         color="white", fontsize=12, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 def plot_coverage_registration_comparison(
@@ -493,6 +517,7 @@ def plot_coverage_registration_comparison(
         color="white", fontsize=11, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
     # Metrics table
@@ -644,6 +669,7 @@ def compare_registration_coverage(
         f"(orange contour = {bestsnr_label} reg boundary, cyan contour = {sum_label} boundary, T1w background)",
         color="white", fontsize=12, y=1.01,
     )
+    _auto_save(fig)
     plt.show()
 
     # ── print metrics table ────────────────────────────────────────────────
@@ -720,6 +746,7 @@ def plot_sum_registration_comparison(
         color="white", fontsize=11, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
     # Print alignment quality metrics for both
@@ -786,6 +813,7 @@ def plot_water_mask_comparison(
         color="white", fontsize=11, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
     print(f"Raw mask voxels   : {n_raw:,}")
@@ -844,6 +872,7 @@ def plot_mrsi_mosaic(
         color="white", fontsize=12, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 def plot_mrsi_combined(
@@ -918,6 +947,7 @@ def plot_mrsi_combined(
         color="white", fontsize=12,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 def build_coverage_widget(
@@ -1081,11 +1111,10 @@ def build_coverage_widget(
     return ui
 
 def plot_inverse_registration_panels(
-    mrsi_sum_img: nib.Nifti1Image,
-    mrsi_gly_img: nib.Nifti1Image,
-    t1w_via_sum_img: nib.Nifti1Image,
-    t1w_via_gly_img: nib.Nifti1Image,
-    t1w_via_sum_in_gly_img: nib.Nifti1Image,
+    t1w_bg_img: nib.Nifti1Image,
+    sum_in_t1w_img: nib.Nifti1Image,
+    gly_in_t1w_img: nib.Nifti1Image,
+    gly_via_sum_in_t1w_img: nib.Nifti1Image,
     subj: str = "sub-01",
     ses: str = "ses-01",
     sum_label: str = "Sum",
@@ -1094,30 +1123,37 @@ def plot_inverse_registration_panels(
     mrs_cmap: str = "hot"):
 
     views = [
-        (mrsi_sum_img,           t1w_via_sum_img,        f"T1w → {sum_label} space\n(sum-driven reg)",         f"{sum_label} map"),
-        (mrsi_gly_img,           t1w_via_gly_img,        f"T1w → {gly_label} space\n({gly_label}-own reg)",    f"{gly_label} map"),
-        (mrsi_gly_img,           t1w_via_sum_in_gly_img, f"T1w → {gly_label} space\n(sum transform reused)",   f"{gly_label} map"),
+        (sum_in_t1w_img,         f"{sum_label} in T1w\n(sum-driven reg)"),
+        (gly_in_t1w_img,         f"{gly_label} in T1w\n({gly_label}-own reg)"),
+        (gly_via_sum_in_t1w_img, f"{gly_label} in T1w\n(sum transform reused)"),
     ]
 
     view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
 
+    bg_norm = _norm(t1w_bg_img.get_fdata())
+    mid = [s // 2 for s in bg_norm.shape]
+    slices_bg = [bg_norm[:, :, mid[2]], bg_norm[:, mid[1], :], bg_norm[mid[0], :, :]]
+
     fig, axes = plt.subplots(3, 3, figsize=(15, 12), facecolor="black")
     fig.subplots_adjust(hspace=0.08, wspace=0.04)
 
-    for col, (bg_img, t1w_reg_img, col_title, bg_label) in enumerate(views):
-        bg_norm  = _norm(bg_img.get_fdata())
-        t1w_norm = _norm(t1w_reg_img.get_fdata())
-        mid = [s // 2 for s in bg_norm.shape]
+    for col, (mrsi_img, col_title) in enumerate(views):
+        if mrsi_img is None:
+            for row in range(3):
+                axes[row, col].set_facecolor("black")
+                axes[row, col].axis("off")
+            axes[0, col].set_title(col_title + "\n(not available)", color="white", fontsize=9)
+            continue
 
-        slices_bg  = [bg_norm[:, :, mid[2]], bg_norm[:, mid[1], :], bg_norm[mid[0], :, :]]
-        slices_t1w = [t1w_norm[:, :, mid[2]], t1w_norm[:, mid[1], :], t1w_norm[mid[0], :, :]]
+        mrsi_norm  = _norm(mrsi_img.get_fdata())
+        slices_mrsi = [mrsi_norm[:, :, mid[2]], mrsi_norm[:, mid[1], :], mrsi_norm[mid[0], :, :]]
 
-        for row, (s_bg, s_t1w, vl) in enumerate(zip(slices_bg, slices_t1w, view_labels)):
+        for row, (s_bg, s_mrsi, vl) in enumerate(zip(slices_bg, slices_mrsi, view_labels)):
             ax = axes[row, col]
             ax.set_facecolor("black")
-            ax.imshow(s_t1w.T, origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
+            ax.imshow(s_bg.T,   origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=1.0)
-            ax.imshow(s_bg.T,  origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
+            ax.imshow(s_mrsi.T, origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=0.6)
             ax.axis("off")
             if col == 0:
@@ -1126,16 +1162,17 @@ def plot_inverse_registration_panels(
                 ax.set_title(col_title, color="white", fontsize=10, pad=6)
 
     fig.suptitle(
-        f"{subj} {ses} – T1w registered into MRSI space (inverse registration)\n"
-        f"MRSI overlay ({mrs_cmap}, α=0.6) on registered T1w background",
+        f"{subj} {ses} – MRSI maps warped into T1w space (inverse transform)\n"
+        f"T1w background ({t1w_cmap}) + MRSI overlay ({mrs_cmap}, α=0.6)",
         color="white", fontsize=12, y=1.01,
     )
+    _auto_save(fig)
     plt.show()
 
 def compare_inverse_registration_pair(
-    mrsi_bg_img: nib.Nifti1Image,
-    t1w_left_img: nib.Nifti1Image,
-    t1w_right_img: nib.Nifti1Image,
+    t1w_bg_img: nib.Nifti1Image,
+    mrsi_left_img: nib.Nifti1Image,
+    mrsi_right_img: nib.Nifti1Image,
     subj: str = "sub-01",
     ses: str = "ses-01",
     label_left: str = "No mask",
@@ -1143,10 +1180,10 @@ def compare_inverse_registration_pair(
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
 
-    bg_norm = _norm(mrsi_bg_img.get_fdata())
+    bg_norm = _norm(t1w_bg_img.get_fdata())
     views = [
-        (t1w_left_img,  label_left),
-        (t1w_right_img, label_right),
+        (mrsi_left_img,  label_left),
+        (mrsi_right_img, label_right),
     ]
     view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
     mid = [s // 2 for s in bg_norm.shape]
@@ -1156,16 +1193,23 @@ def compare_inverse_registration_pair(
 
     slices_bg = [bg_norm[:, :, mid[2]], bg_norm[:, mid[1], :], bg_norm[mid[0], :, :]]
 
-    for col, (t1w_img, col_title) in enumerate(views):
-        t1w_norm = _norm(t1w_img.get_fdata())
-        slices_t1w = [t1w_norm[:, :, mid[2]], t1w_norm[:, mid[1], :], t1w_norm[mid[0], :, :]]
+    for col, (mrsi_img, col_title) in enumerate(views):
+        if mrsi_img is None:
+            for row in range(3):
+                axes[row, col].set_facecolor("black")
+                axes[row, col].axis("off")
+            axes[0, col].set_title(col_title + "\n(not available)", color="white", fontsize=9)
+            continue
 
-        for row, (s_bg, s_t1w, vl) in enumerate(zip(slices_bg, slices_t1w, view_labels)):
+        mrsi_norm  = _norm(mrsi_img.get_fdata())
+        slices_mrsi = [mrsi_norm[:, :, mid[2]], mrsi_norm[:, mid[1], :], mrsi_norm[mid[0], :, :]]
+
+        for row, (s_bg, s_mrsi, vl) in enumerate(zip(slices_bg, slices_mrsi, view_labels)):
             ax = axes[row, col]
             ax.set_facecolor("black")
-            ax.imshow(s_t1w.T, origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
+            ax.imshow(s_bg.T,   origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=1.0)
-            ax.imshow(s_bg.T, origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
+            ax.imshow(s_mrsi.T, origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=0.6)
             ax.axis("off")
             if col == 0:
@@ -1175,9 +1219,10 @@ def compare_inverse_registration_pair(
 
     fig.suptitle(
         f"{subj} {ses} – Inverse registration comparison\n"
-        f"MRSI overlay ({mrs_cmap}, α=0.6) on registered T1w background",
+        f"T1w background ({t1w_cmap}) + MRSI overlay ({mrs_cmap}, α=0.6)",
         color="white", fontsize=12, y=1.01,
     )
+    _auto_save(fig)
     plt.show()
 
 def plot_total_pipeline_comparison(
@@ -1234,6 +1279,7 @@ def plot_total_pipeline_comparison(
         color="white", fontsize=10, y=1.02,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 
@@ -1297,6 +1343,7 @@ def plot_total_pipeline_mask_comparison(
         color="white", fontsize=11, y=1.02,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 
@@ -1438,6 +1485,7 @@ def plot_registration_metrics(
         f"{subj}  {ses}  –  Registration quality metrics  (Reg-17 total pipeline)",
         color=TXT, fontsize=12,
     )
+    _auto_save(fig)
     plt.show()
 
     # print table 
@@ -1609,6 +1657,7 @@ def plot_pipeline_metrics_comparison(
         color=TXT, fontsize=12, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
     # print summary table
@@ -1677,6 +1726,7 @@ def plot_final_registration_mosaic(
         color="white", fontsize=10, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 
@@ -1768,6 +1818,7 @@ def plot_segmentation(
         ax_bot_mid.axis("off")
 
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
     # ── volume summary ──────────────────────────────────────────────────────
@@ -1939,6 +1990,7 @@ def plot_mrsi_sum_mask_contours(
                    frameon=False, labelcolor="white", fontsize=9,
                    bbox_to_anchor=(0.5, -0.04))
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 
@@ -2114,6 +2166,7 @@ def plot_mask_coverage_comparaison(
                frameon=False, labelcolor="white", fontsize=9,
                bbox_to_anchor=(0.5, -0.02))
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
 
@@ -2249,6 +2302,7 @@ def plot_multi_reg_nmi_comparison(
         color=TXT, fontsize=10, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
 
     print(f"\n{'Method':<35}  {'NMI':>7}  {'Coverage':>9}")
@@ -2442,4 +2496,5 @@ def plot_tissue_metabolite_metrics(
         color=TXT, fontsize=10, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
     plt.show()
