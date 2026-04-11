@@ -17,6 +17,13 @@ from data_utils import (
 
 # Plot utilities
 
+def _norm(data: np.ndarray) -> np.ndarray:
+    """Normalise to [0, 1] using the 99th percentile of positive values."""
+    pos = data[data > 0]
+    if pos.size == 0:
+        return data
+    return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
+
 
 def plot_single_overlay(
     mrs_filename: str,
@@ -274,14 +281,8 @@ def plot_registration_comparison(
     mrsi_label: str = "MRSI",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
-  
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
-    t1w_norm = _norm(t1w_img.get_fdata().astype(np.float32))
+    t1w_norm = _norm(t1w_img.get_fdata())
     mid = [s // 2 for s in t1w_norm.shape]
 
     def _slices(vol):
@@ -337,12 +338,6 @@ def plot_registration_methods_comparison(
     mrsi_label: str = "MRSI",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
-    
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
     view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
 
@@ -398,14 +393,8 @@ def plot_registration_target_comparison(
     sum_label: str = "Metabolite sum",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
-  
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
-    t1w_norm = _norm(t1w_ds_img.get_fdata().astype(np.float32))
+    t1w_norm = _norm(t1w_ds_img.get_fdata())
     mid = [s // 2 for s in t1w_norm.shape]
 
     def _slices(vol):
@@ -461,14 +450,8 @@ def plot_coverage_registration_comparison(
     gly_label: str = "Gly",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
-   
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
-    t1w_norm = _norm(t1w_ds_img.get_fdata().astype(np.float32))
+    t1w_norm = _norm(t1w_ds_img.get_fdata())
     mid = [s // 2 for s in t1w_norm.shape]
 
     def _slices(vol):
@@ -536,14 +519,8 @@ def compare_registration_coverage(
     ses: str = "ses-01",
     bestsnr_label: str = "best-SNR metabolite",
     sum_label: str = "Sum reg"):
-    
-    def _norm(data: np.ndarray) :
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
-    d_bestsnr = _norm(mrsi_reg_bestsnr_img.get_fdata().astype(np.float32))
+    d_bestsnr = _norm(mrsi_reg_bestsnr_img.get_fdata())
     d_sum     = _norm(mrsi_reg_sum_img.get_fdata().astype(np.float32))
     diff      = d_bestsnr - d_sum   # positive = more MRSI signal in best-SNR reg
 
@@ -695,13 +672,7 @@ def plot_sum_registration_comparison(
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
 
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
-
-    t1w_norm = _norm(t1w_ds_img.get_fdata().astype(np.float32))
+    t1w_norm = _norm(t1w_ds_img.get_fdata())
     mid = [s // 2 for s in t1w_norm.shape]
 
     def _slices(vol):
@@ -1121,12 +1092,6 @@ def plot_inverse_registration_panels(
     gly_label: str = "Gly",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
-    
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
     views = [
         (mrsi_sum_img,           t1w_via_sum_img,        f"T1w → {sum_label} space\n(sum-driven reg)",         f"{sum_label} map"),
@@ -1177,14 +1142,8 @@ def compare_inverse_registration_pair(
     label_right: str = "Water weighted",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
-    
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
-    bg_norm = _norm(mrsi_bg_img.get_fdata().astype(np.float32))
+    bg_norm = _norm(mrsi_bg_img.get_fdata())
     views = [
         (t1w_left_img,  label_left),
         (t1w_right_img, label_right),
@@ -1232,12 +1191,6 @@ def plot_total_pipeline_comparison(
     label_right: str = "Reg 17 – skull-stripped T1w\n→ reoriented sum (total pipeline)",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
- 
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
     panels = [
         (sum_orig_img,  t1w_in_sum_orig_img, label_left),
@@ -1298,12 +1251,6 @@ def plot_total_pipeline_mask_comparison(
     Columns : BET mask | FreeSurfer / atlas mask | Water mask
     Rows    : Axial | Coronal | Sagittal (mid-slice of sum_ras_img)
     """
-
-    def _norm(data: np.ndarray) -> np.ndarray:
-        pos = data[data > 0]
-        if pos.size == 0:
-            return data
-        return np.clip(data / float(np.nanpercentile(pos, 99)), 0, 1)
 
     panels = [
         (t1w_bet_img,        "Reg-17  BET mask"),

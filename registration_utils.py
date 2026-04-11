@@ -15,6 +15,9 @@ from data_utils import (
 
 # Registration utilities
 
+def _f32(img: nib.Nifti1Image) :
+    return img.get_fdata()
+
 
 def register_mrsi_to_t1w(
     mrsi_img: nib.Nifti1Image,
@@ -38,9 +41,9 @@ def register_mrsi_to_t1w(
         )
         return nib.load(out_path), saved_t
 
-    mrsi_data   = mrsi_img.get_fdata().astype(np.float32)
+    mrsi_data   = _f32(mrsi_img)
     mrsi_masked = np.where(mask, mrsi_data, 0.0)
-    t1w_data    = t1w_img.get_fdata().astype(np.float32)
+    t1w_data    = _f32(t1w_img)
 
     fixed_ants  = _nib_to_ants(t1w_data, t1w_img)
     moving_ants = _nib_to_ants(mrsi_masked, mrsi_img)
@@ -76,16 +79,15 @@ def register_mrsi_to_t1w(
     # Warp the mask into T1w space so we can zero out voxels 
     warped_mask_ants = ants.apply_transforms(
         fixed=fixed_ants,
-        moving=_nib_to_ants(mask.astype(np.float32), mrsi_img),
+        moving=_nib_to_ants(mask.astype(float), mrsi_img),
         transformlist=fwd_transforms,
         interpolator="nearestNeighbor")
     brain_mask_t1w = warped_mask_ants.numpy() > 0.5
 
-    reg_data = warped_ants.numpy().astype(np.float32)
+    reg_data = warped_ants.numpy()
     reg_data[~brain_mask_t1w] = 0.0
 
     reg_img = nib.Nifti1Image(reg_data, t1w_img.affine, t1w_img.header)
-    reg_img.set_data_dtype(np.float32)
 
     if out_path:
         nib.save(reg_img, out_path)
@@ -114,8 +116,8 @@ def register_t1w_to_mrsi(
         )
         return nib.load(out_path), saved_t
 
-    t1w_data  = t1w_img.get_fdata().astype(np.float32)
-    mrsi_data = mrsi_img.get_fdata().astype(np.float32)
+    t1w_data  = _f32(t1w_img)
+    mrsi_data = _f32(mrsi_img)
     mrsi_fixed = np.where(mask, mrsi_data, 0.0) if mask is not None else mrsi_data
 
     fixed_ants  = _nib_to_ants(mrsi_fixed, mrsi_img)
@@ -149,9 +151,8 @@ def register_t1w_to_mrsi(
         interpolator="linear",
     )
 
-    reg_data = warped_ants.numpy().astype(np.float32)
+    reg_data = warped_ants.numpy()
     reg_img  = nib.Nifti1Image(reg_data, mrsi_img.affine, mrsi_img.header)
-    reg_img.set_data_dtype(np.float32)
 
     if out_path:
         nib.save(reg_img, out_path)
@@ -276,12 +277,10 @@ def apply_transform_to_metabolite(
     out_dir = os.path.dirname(out_path)
     os.makedirs(out_dir, exist_ok=True)
     label   = metabolite_name(mrsi_path)
-    ras_tmp = os.path.join(out_dir, f"_tmp_{label}_ras.nii.gz")
-    nib.save(nib.as_closest_canonical(nib.load(mrsi_path)), ras_tmp)
 
     cmd = [
         "antsApplyTransforms", "-d", "3",
-        "-i", ras_tmp,
+        "-i", mrsi_path,
         "-r", t1w_ref_path,
         "-t", f"[{transform_path},1]",  
         "-n", "Linear",
@@ -294,9 +293,6 @@ def apply_transform_to_metabolite(
     except subprocess.CalledProcessError as e:
         print(f"  [reg17] {label}: FAILED\n{e.stderr.decode()}")
         return None
-    finally:
-        if os.path.exists(ras_tmp):
-            os.remove(ras_tmp)
 
 def apply_transform_all_metabolites(
     mrs_dir: str,
@@ -333,13 +329,13 @@ def compute_registration_metrics(
     t1w_img: nib.Nifti1Image,
     reg_mrsi_imgs: dict):
     
-    t1w_data   = t1w_img.get_fdata().astype(np.float32)
+    t1w_data   = _f32(t1w_img)
     brain_mask = t1w_data > 0
     n_brain    = int(brain_mask.sum())
 
     records = []
     for label, img in reg_mrsi_imgs.items():
-        mrsi_data   = img.get_fdata().astype(np.float32)
+        mrsi_data   = _f32(img)
         signal_mask = mrsi_data > 0
         overlap     = brain_mask & signal_mask
         coverage    = float(overlap.sum()) / n_brain if n_brain > 0 else 0.0
