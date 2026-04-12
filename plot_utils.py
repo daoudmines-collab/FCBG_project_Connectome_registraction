@@ -83,6 +83,7 @@ def plot_single_overlay(
         vmax=vmax,
         resampling_interpolation="continuous",
     )
+    fig = plt.gcf()
     _auto_save(fig)
     plt.show()
     return estimate_coverage(mrs_res, t1_img)
@@ -109,6 +110,7 @@ def plot_support_mask(
         display_mode="ortho",
         cut_coords=get_nonzero_com(mask_res),
     )
+    fig = plt.gcf()
     _auto_save(fig)
     plt.show()
     return estimate_coverage(mask_res, t1_img)
@@ -1111,49 +1113,53 @@ def build_coverage_widget(
     return ui
 
 def plot_inverse_registration_panels(
-    t1w_bg_img: nib.Nifti1Image,
-    sum_in_t1w_img: nib.Nifti1Image,
-    gly_in_t1w_img: nib.Nifti1Image,
-    gly_via_sum_in_t1w_img: nib.Nifti1Image,
+    mrsi_sum_img: nib.Nifti1Image,
+    mrsi_gly_img: nib.Nifti1Image,
+    t1w_via_sum_img: nib.Nifti1Image,
+    t1w_via_gly_img: nib.Nifti1Image,
+    t1w_via_sum_in_gly_img: nib.Nifti1Image,
     subj: str = "sub-01",
     ses: str = "ses-01",
     sum_label: str = "Sum",
     gly_label: str = "Gly",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
+    """3-column panel: MRSI (background) + T1w registered to MRSI space (overlay).
 
-    views = [
-        (sum_in_t1w_img,         f"{sum_label} in T1w\n(sum-driven reg)"),
-        (gly_in_t1w_img,         f"{gly_label} in T1w\n({gly_label}-own reg)"),
-        (gly_via_sum_in_t1w_img, f"{gly_label} in T1w\n(sum transform reused)"),
+    Col 0: sum MRSI bg  + T1w via sum registration
+    Col 1: gly MRSI bg  + T1w via gly registration
+    Col 2: gly MRSI bg  + T1w via sum-transform reused in gly space
+    """
+    panels = [
+        (mrsi_sum_img, t1w_via_sum_img,        f"{sum_label} MRSI\nT1w via sum reg"),
+        (mrsi_gly_img, t1w_via_gly_img,        f"{gly_label} MRSI\nT1w via gly reg"),
+        (mrsi_gly_img, t1w_via_sum_in_gly_img, f"{gly_label} MRSI\nT1w via sum xfm"),
     ]
-
     view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
-
-    bg_norm = _norm(t1w_bg_img.get_fdata())
-    mid = [s // 2 for s in bg_norm.shape]
-    slices_bg = [bg_norm[:, :, mid[2]], bg_norm[:, mid[1], :], bg_norm[mid[0], :, :]]
 
     fig, axes = plt.subplots(3, 3, figsize=(15, 12), facecolor="black")
     fig.subplots_adjust(hspace=0.08, wspace=0.04)
 
-    for col, (mrsi_img, col_title) in enumerate(views):
-        if mrsi_img is None:
+    for col, (mrsi_img, t1w_img, col_title) in enumerate(panels):
+        if mrsi_img is None or t1w_img is None:
             for row in range(3):
                 axes[row, col].set_facecolor("black")
                 axes[row, col].axis("off")
             axes[0, col].set_title(col_title + "\n(not available)", color="white", fontsize=9)
             continue
 
-        mrsi_norm  = _norm(mrsi_img.get_fdata())
-        slices_mrsi = [mrsi_norm[:, :, mid[2]], mrsi_norm[:, mid[1], :], mrsi_norm[mid[0], :, :]]
+        mrs_norm = _norm(mrsi_img.get_fdata())
+        t1w_norm = _norm(t1w_img.get_fdata())
+        mid = [s // 2 for s in mrs_norm.shape]
+        slices_mrs = [mrs_norm[:, :, mid[2]], mrs_norm[:, mid[1], :], mrs_norm[mid[0], :, :]]
+        slices_t1w = [t1w_norm[:, :, mid[2]], t1w_norm[:, mid[1], :], t1w_norm[mid[0], :, :]]
 
-        for row, (s_bg, s_mrsi, vl) in enumerate(zip(slices_bg, slices_mrsi, view_labels)):
+        for row, (s_mrs, s_t1w, vl) in enumerate(zip(slices_mrs, slices_t1w, view_labels)):
             ax = axes[row, col]
             ax.set_facecolor("black")
-            ax.imshow(s_bg.T,   origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
+            ax.imshow(s_t1w.T, origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=1.0)
-            ax.imshow(s_mrsi.T, origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
+            ax.imshow(s_mrs.T, origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=0.6)
             ax.axis("off")
             if col == 0:
@@ -1162,54 +1168,54 @@ def plot_inverse_registration_panels(
                 ax.set_title(col_title, color="white", fontsize=10, pad=6)
 
     fig.suptitle(
-        f"{subj} {ses} – MRSI maps warped into T1w space (inverse transform)\n"
-        f"T1w background ({t1w_cmap}) + MRSI overlay ({mrs_cmap}, α=0.6)",
+        f"{subj} {ses} – Inverse registration: T1w warped to MRSI space\n"
+        f"T1w overlay ({t1w_cmap}) + MRSI background ({mrs_cmap}, α=0.6)",
         color="white", fontsize=12, y=1.01,
     )
     _auto_save(fig)
     plt.show()
 
 def compare_inverse_registration_pair(
-    t1w_bg_img: nib.Nifti1Image,
-    mrsi_left_img: nib.Nifti1Image,
-    mrsi_right_img: nib.Nifti1Image,
+    mrsi_bg_img: nib.Nifti1Image,
+    t1w_left_img: nib.Nifti1Image,
+    t1w_right_img: nib.Nifti1Image,
     subj: str = "sub-01",
     ses: str = "ses-01",
     label_left: str = "No mask",
     label_right: str = "Water weighted",
     t1w_cmap: str = "gray",
     mrs_cmap: str = "hot"):
-
-    bg_norm = _norm(t1w_bg_img.get_fdata())
-    views = [
-        (mrsi_left_img,  label_left),
-        (mrsi_right_img, label_right),
+    """Side-by-side: same MRSI background, two different T1w registrations as overlay."""
+    panels = [
+        (t1w_left_img,  label_left),
+        (t1w_right_img, label_right),
     ]
     view_labels = ["Axial (z)", "Coronal (y)", "Sagittal (x)"]
-    mid = [s // 2 for s in bg_norm.shape]
+
+    mrs_norm = _norm(mrsi_bg_img.get_fdata())
+    mid = [s // 2 for s in mrs_norm.shape]
+    slices_mrs = [mrs_norm[:, :, mid[2]], mrs_norm[:, mid[1], :], mrs_norm[mid[0], :, :]]
 
     fig, axes = plt.subplots(3, 2, figsize=(10, 12), facecolor="black")
     fig.subplots_adjust(hspace=0.08, wspace=0.04)
 
-    slices_bg = [bg_norm[:, :, mid[2]], bg_norm[:, mid[1], :], bg_norm[mid[0], :, :]]
-
-    for col, (mrsi_img, col_title) in enumerate(views):
-        if mrsi_img is None:
+    for col, (t1w_img, col_title) in enumerate(panels):
+        if t1w_img is None:
             for row in range(3):
                 axes[row, col].set_facecolor("black")
                 axes[row, col].axis("off")
             axes[0, col].set_title(col_title + "\n(not available)", color="white", fontsize=9)
             continue
 
-        mrsi_norm  = _norm(mrsi_img.get_fdata())
-        slices_mrsi = [mrsi_norm[:, :, mid[2]], mrsi_norm[:, mid[1], :], mrsi_norm[mid[0], :, :]]
+        t1w_norm = _norm(t1w_img.get_fdata())
+        slices_t1w = [t1w_norm[:, :, mid[2]], t1w_norm[:, mid[1], :], t1w_norm[mid[0], :, :]]
 
-        for row, (s_bg, s_mrsi, vl) in enumerate(zip(slices_bg, slices_mrsi, view_labels)):
+        for row, (s_mrs, s_t1w, vl) in enumerate(zip(slices_mrs, slices_t1w, view_labels)):
             ax = axes[row, col]
             ax.set_facecolor("black")
-            ax.imshow(s_bg.T,   origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
+            ax.imshow(s_t1w.T, origin="lower", cmap=t1w_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=1.0)
-            ax.imshow(s_mrsi.T, origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
+            ax.imshow(s_mrs.T, origin="lower", cmap=mrs_cmap, vmin=0, vmax=1,
                       interpolation="nearest", alpha=0.6)
             ax.axis("off")
             if col == 0:
@@ -1219,7 +1225,7 @@ def compare_inverse_registration_pair(
 
     fig.suptitle(
         f"{subj} {ses} – Inverse registration comparison\n"
-        f"T1w background ({t1w_cmap}) + MRSI overlay ({mrs_cmap}, α=0.6)",
+        f"T1w overlay ({t1w_cmap}) + MRSI background ({mrs_cmap}, α=0.6)",
         color="white", fontsize=12, y=1.01,
     )
     _auto_save(fig)
