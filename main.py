@@ -426,6 +426,9 @@ BET_MASK_REG_PATH = os.path.join(OUTPUT_DIR, BET_MASK_REG_NAME)
 
 # freesurfer brain mask to  MRSI space (Reg-15 brain to sum forward transform)
 
+FREESURFER_BRAIN_SRC_NAME = f"{SUBJ}_{SES}_acq-UNIDEND_T1w_brain_synthstrip.nii"
+FREESURFER_BRAIN_SRC_PATH = os.path.join(OUTPUT_DIR, FREESURFER_BRAIN_SRC_NAME)
+
 FREESURFER_MASK_SRC_NAME = f"{SUBJ}_{SES}_acq-UNIDEND_T1w_brainmask_synthstrip.nii"
 FREESURFER_MASK_SRC_PATH = os.path.join(OUTPUT_DIR, FREESURFER_MASK_SRC_NAME)
 
@@ -480,6 +483,17 @@ water_mask_reg_img = apply_transform(
 
 # Downsample the FreeSurfer atlas mask to the MRSI-DS voxel grid
 # (required as ANTs moving mask: must match the moving image resolution)
+FREESURFER_BRAIN_DS_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-BrainSynthstrip_T1w.nii.gz"
+FREESURFER_BRAIN_DS_PATH = os.path.join(OUTPUT_DIR, FREESURFER_BRAIN_DS_NAME)
+if not os.path.exists(FREESURFER_BRAIN_DS_PATH) and os.path.exists(FREESURFER_BRAIN_SRC_PATH):
+    _fs_brain_img = nib.load(FREESURFER_BRAIN_SRC_PATH)
+    _fs_brain_ds  = resample_from_to(_fs_brain_img, mrs_example, order=1)
+    _fs_brain_ds  = nib.Nifti1Image(np.array(_fs_brain_ds.dataobj, dtype=np.float32),
+                                    _fs_brain_ds.affine, _fs_brain_ds.header)
+    nib.save(_fs_brain_ds, FREESURFER_BRAIN_DS_PATH)
+    print(f"  [fs-brain-ds] saved {FREESURFER_BRAIN_DS_NAME}")
+fs_ds_brain_img = nib.load(FREESURFER_BRAIN_DS_PATH) if os.path.exists(FREESURFER_BRAIN_DS_PATH) else t1w_ds_brain_img
+
 FREESURFER_MASK_DS_NAME = f"{SUBJ}_{SES}_acq-MRSIres_desc-FreesurferMaskDS_T1w.nii.gz"
 FREESURFER_MASK_DS_PATH = os.path.join(OUTPUT_DIR, FREESURFER_MASK_DS_NAME)
 if not os.path.exists(FREESURFER_MASK_DS_PATH) and os.path.exists(FREESURFER_MASK_SRC_PATH):
@@ -500,8 +514,8 @@ _fs_mask_arg = FREESURFER_MASK_DS_PATH if os.path.exists(FREESURFER_MASK_DS_PATH
     metrics_freesurfer_mask) = run_total_pipeline(
     mrs_dir=MRS_DIR,
     water_path=WATER_PATH,
-    t1w_ds_brain_path=T1W_DS_BRAIN_PATH,
-    t1w_ds_brain_img=t1w_ds_brain_img,
+    t1w_ds_brain_path=FREESURFER_BRAIN_DS_PATH,
+    t1w_ds_brain_img=fs_ds_brain_img,
     subj=SUBJ,
     ses=SES,
     output_dir=OUTPUT_DIR,
