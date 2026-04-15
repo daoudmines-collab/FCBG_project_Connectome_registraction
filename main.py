@@ -12,13 +12,20 @@ from data_utils import (
     rank_metabolites_by_snr,
     skull_strip_t1w,
     segment_t1w,
-    segment_t1w_atlas)
+    segment_t1w_atlas,
+    metabolite_name)
 from registration_utils import (
     register_mrsi_to_t1w,
     register_t1w_to_mrsi,
     register_t1w_to_mrsi_weighted,
     apply_transform,
-    run_total_pipeline)
+    apply_transforms_multi,
+    run_total_pipeline,
+    compute_registration_metrics,
+    prepare_tissue_fraction_maps,
+    compute_tissue_concentration_metrics,
+    compare_tissue_metric_states,
+    print_tissue_metric_comparison)
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR     = os.path.join(PROJECT_ROOT, "data")
@@ -453,7 +460,7 @@ freesurfer_mask_reg_img = apply_transform(
         transform_path=brain_sum_transforms[0],
         out_path=FREESURFER_MASK_REG_PATH,
         overwrite=False)
-
+ 
 water_mask_reg_img = apply_transform(
         in_path=WATER_MASK_PATH,
         ref_path=SUM_RAS_PATH,
@@ -528,6 +535,134 @@ _fs_mask_arg = FREESURFER_MASK_DS_PATH if os.path.exists(FREESURFER_MASK_DS_PATH
 t1w_brain_in_sum_ras_img = t1w_brain_in_sum_ras_img_bet_mask
 brain_sum_ras_transforms  = brain_sum_ras_transforms_bet_mask
 final_reg_imgs            = final_reg_imgs_bet_mask
+
+# ── Before-registration baseline ──────────────────────────────────────────────
+# Raw MRSI maps simply resampled (no transform) to the DS T1w grid.
+# Used as a "before" baseline when plotting metrics.
+_raw_mrsi_maps = sorted(
+    f for f in os.listdir(MRS_DIR)
+    if f.endswith(".nii.gz") and "acq-OrigRes" in f and "AllMetab" not in f
+)
+_raw_mrsi_dict = {}
+for _fname in _raw_mrsi_maps:
+    _label = metabolite_name(_fname)
+    _raw_img = nib.load(os.path.join(MRS_DIR, _fname))
+    _raw_ds  = resample_from_to(_raw_img, t1w_ds_brain_img, order=1)
+    _raw_mrsi_dict[_label] = nib.Nifti1Image(
+        np.array(_raw_ds.dataobj, dtype=np.float32),
+        t1w_ds_brain_img.affine, t1w_ds_brain_img.header)
+# Also include water signal (same label as used in run_total_pipeline)
+_water_raw_ds = resample_from_to(nib.load(WATER_PATH), t1w_ds_brain_img, order=1)
+_raw_mrsi_dict["WaterSignal"] = nib.Nifti1Image(
+    np.array(_water_raw_ds.dataobj, dtype=np.float32),
+    t1w_ds_brain_img.affine, t1w_ds_brain_img.header)
+metrics_before = compute_registration_metrics(t1w_ds_brain_img, _raw_mrsi_dict)
+
+# ── Toolbox (article) pipeline metrics ────────────────────────────────────────
+# Apply the toolbox SyN + affine forward transforms (MRSI → T1w) to every
+# OrigRes metabolite and compute quality metrics on the same DS T1w grid.
+_TOOLBOX_XFM_DIR  = os.path.join(DATA_DIR, "bids", "derivatives", "transforms",
+                                  "ants", SUBJ, SES, "mrsi")
+_TOOLBOX_SYN_PATH = os.path.join(_TOOLBOX_XFM_DIR,
+                                  f"{SUBJ}_{SES}_desc-mrsi_to_t1w.syn.nii.gz")
+_TOOLBOX_AFF_PATH = os.path.join(_TOOLBOX_XFM_DIR,
+                                  f"{SUBJ}_{SES}_desc-mrsi_to_t1w.affine.mat")
+_toolbox_mrsi_dict = {}
+if os.path.exists(_TOOLBOX_SYN_PATH) and os.path.exists(_TOOLBOX_AFF_PATH):
+    print("[toolbox] applying SyN+affine transforms to all metabolites...")
+    for _fname in _raw_mrsi_maps:
+        _label    = metabolite_name(_fname)
+        _out_name = (f"{SUBJ}_{SES}_acq-MRSIres_desc-{_label}ToolboxSyN_T1w.nii.gz")
+        _out_path = os.path.join(OUTPUT_DIR, "final_reg", _out_name)
+        _img = apply_transforms_multi(
+            in_path=os.path.join(MRS_DIR, _fname),
+            ref_path=T1W_DS_BRAIN_PATH,
+            transform_paths=[_TOOLBOX_SYN_PATH, _TOOLBOX_AFF_PATH],
+            out_path=_out_path,
+            overwrite=False,
+        )
+        if _img is not None:
+            _toolbox_mrsi_dict[_label] = _img
+    # Also apply toolbox transform to the water signal (using RAS-reoriented version if available)
+    _water_ras_path = os.path.join(OUTPUT_DIR, f"{SUBJ}_{SES}_desc-WaterSignalRAS_mrsi.nii.gz")
+    _water_src = _water_ras_path if os.path.exists(_water_ras_path) else WATER_PATH
+    _water_tb_out = os.path.join(OUTPUT_DIR, "final_reg",
+                                  f"{SUBJ}_{SES}_acq-MRSIres_desc-WaterSignalToolboxSyN_T1w.nii.gz")
+    _water_tb_img = apply_transforms_multi(
+        in_path=_water_src,
+        ref_path=T1W_DS_BRAIN_PATH,
+        transform_paths=[_TOOLBOX_SYN_PATH, _TOOLBOX_AFF_PATH],
+        out_path=_water_tb_out,
+        overwrite=False,
+    )
+    if _water_tb_img is not None:
+        _toolbox_mrsi_dict["WaterSignal"] = _water_tb_img
+    metrics_toolbox = compute_registration_metrics(t1w_ds_brain_img, _toolbox_mrsi_dict)
+else:
+    print(f"  [toolbox] transforms not found at {_TOOLBOX_XFM_DIR}, skipping metrics_toolbox")
+    metrics_toolbox = []
+
+# ── Tissue-fraction metabolite comparison: before vs our pipeline vs article ──
+def _is_tissue_metric_metabolite(label: str):
+    upper = label.upper()
+    if label == "WaterSignal":
+        return True
+    if "add" in label or upper.startswith("LIP") or upper.startswith("MM"):
+        return False
+    if upper.startswith("MINUS") or upper in {"EIB", "VOXELSNR", "VOXELFWHM", "VOXELFREQSHIFT"}:
+        return False
+    return True
+
+
+TISSUE_METRIC_LABELS = sorted(
+    {label for label in (list(_raw_mrsi_dict.keys()) + ["WaterSignal"])
+    if _is_tissue_metric_metabolite(label)
+    }
+)
+
+if all(os.path.exists(path) for path in [PVE_GM_PATH, PVE_WM_PATH, PVE_CSF_PATH]):
+    TISSUE_FRACTION_MAPS_DS = prepare_tissue_fraction_maps(
+        gm_img=nib.load(PVE_GM_PATH),
+        wm_img=nib.load(PVE_WM_PATH),
+        csf_img=nib.load(PVE_CSF_PATH),
+        ref_img=t1w_ds_brain_img,
+    )
+
+    tissue_metrics_before = compute_tissue_concentration_metrics(
+        tissue_maps=TISSUE_FRACTION_MAPS_DS,
+        mrsi_imgs=_raw_mrsi_dict,
+        labels=TISSUE_METRIC_LABELS,
+        min_signal=0.0,
+    )
+    tissue_metrics_pipeline = compute_tissue_concentration_metrics(
+        tissue_maps=TISSUE_FRACTION_MAPS_DS,
+        mrsi_imgs=final_reg_imgs,
+        labels=TISSUE_METRIC_LABELS,
+        min_signal=0.0,
+    )
+    tissue_metrics_toolbox = compute_tissue_concentration_metrics(
+        tissue_maps=TISSUE_FRACTION_MAPS_DS,
+        mrsi_imgs=_toolbox_mrsi_dict,
+        labels=TISSUE_METRIC_LABELS,
+        min_signal=0.0,
+    )
+    tissue_metrics_comparison = compare_tissue_metric_states(
+        metric_states={
+            "Before": tissue_metrics_before,
+            "Pipeline": tissue_metrics_pipeline,
+            "Article": tissue_metrics_toolbox,
+        },
+        labels=TISSUE_METRIC_LABELS,
+    )
+    print_tissue_metric_comparison(tissue_metrics_comparison, subject=SUBJ)
+else:
+    print("  [tissue-metrics] FAST PVE maps not found, skipping tissue comparison")
+    TISSUE_FRACTION_MAPS_DS = {}
+    tissue_metrics_before = []
+    tissue_metrics_pipeline = []
+    tissue_metrics_toolbox = []
+    tissue_metrics_comparison = []
+
 # # ──────────────────────────────────────────────────────────────────────────
 # # Section 25 – Registration comparison dict (T1w images in MRSI space)
 # # ──────────────────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import nibabel as nib
 import numpy as np
 import subprocess
 import shutil
+from nibabel.processing import resample_from_to
 from data_utils import (
     _nib_to_ants,
     metabolite_name,
@@ -263,6 +264,36 @@ def apply_transform(
     return nib.load(out_path)
 
 
+def apply_transforms_multi(
+    in_path: str,
+    ref_path: str,
+    transform_paths: list,
+    out_path: str,
+    interpolation: str = "Linear",
+    overwrite: bool = False) -> "nib.Nifti1Image | None":
+    """Apply a chain of pre-computed ANTs transforms (forward direction) to a NIfTI image.
+
+    transform_paths is ordered as ANTs expects it: first entry is the last
+    transform applied (e.g. warp field), second is the affine, etc.
+    """
+    if os.path.exists(out_path) and not overwrite:
+        print(f"  [xfm] already exists: {os.path.basename(out_path)}")
+        return nib.load(out_path)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    cmd = ["antsApplyTransforms", "-d", "3", "-i", in_path, "-r", ref_path,
+           "-n", interpolation, "-o", out_path]
+    for t in transform_paths:
+        cmd += ["-t", t]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+        print(f"  [xfm] saved: {os.path.basename(out_path)}")
+        return nib.load(out_path)
+    except subprocess.CalledProcessError as e:
+        print(f"  [xfm] FAILED: {os.path.basename(out_path)}\n{e.stderr.decode()}")
+        return None
+
+
 def apply_transform_to_metabolite(
     mrsi_path: str,
     transform_path: str,
@@ -325,6 +356,201 @@ def apply_transform_all_metabolites(
             results[label] = img
 
     return results
+
+
+def prepare_tissue_fraction_maps(
+    gm_img: nib.Nifti1Image,
+    wm_img: nib.Nifti1Image,
+    csf_img: nib.Nifti1Image,
+    ref_img: nib.Nifti1Image):
+    """Resample FAST PVE maps to a common reference grid and renormalise them."""
+
+    gm_rs = resample_from_to(gm_img, ref_img, order=1)
+    wm_rs = resample_from_to(wm_img, ref_img, order=1)
+    csf_rs = resample_from_to(csf_img, ref_img, order=1)
+
+    gm = np.clip(np.asarray(gm_rs.dataobj, dtype=np.float32), 0.0, 1.0)
+    wm = np.clip(np.asarray(wm_rs.dataobj, dtype=np.float32), 0.0, 1.0)
+    csf = np.clip(np.asarray(csf_rs.dataobj, dtype=np.float32), 0.0, 1.0)
+
+    total = gm + wm + csf
+    brain_mask = total > 1e-6
+    total_safe = np.where(brain_mask, total, 1.0)
+
+    gm /= total_safe
+    wm /= total_safe
+    csf /= total_safe
+
+    gm[~brain_mask] = 0.0
+    wm[~brain_mask] = 0.0
+    csf[~brain_mask] = 0.0
+
+    return {
+        "gm": gm,
+        "wm": wm,
+        "csf": csf,
+        "brain_mask": brain_mask,
+        "ref_img": ref_img,
+    }
+
+
+def compute_tissue_concentration_metrics(
+    tissue_maps: dict,
+    mrsi_imgs: dict,
+    labels: list[str] | None = None,
+    min_signal: float = 0.0):
+    """Summarise metabolite concentrations against GM/WM/CSF fractions.
+
+    All images are assumed to already be on the same reference grid as the
+    tissue maps, or will be resampled to that grid internally.
+    """
+
+    ref_img = tissue_maps["ref_img"]
+    gm = tissue_maps["gm"]
+    wm = tissue_maps["wm"]
+    csf = tissue_maps["csf"]
+    brain_mask = tissue_maps["brain_mask"]
+    wanted = set(labels) if labels is not None else None
+    records = []
+
+    for label, img in mrsi_imgs.items():
+        if wanted is not None and label not in wanted:
+            continue
+
+        if img.shape != ref_img.shape or not np.allclose(img.affine, ref_img.affine, atol=1e-3):
+            img = resample_from_to(img, ref_img, order=1)
+
+        data = np.asarray(img.dataobj, dtype=np.float32)
+        valid = np.isfinite(data) & brain_mask & (data > min_signal)
+        n_vox = int(valid.sum())
+        if n_vox == 0:
+            records.append({
+                "label": label,
+                "n_voxels": 0,
+                "mean_signal": 0.0,
+                "gm_frac_mean": 0.0,
+                "wm_frac_mean": 0.0,
+                "csf_frac_mean": 0.0,
+                "gm_conc": 0.0,
+                "wm_conc": 0.0,
+                "csf_conc": 0.0,
+                "gm_wm_ratio": 0.0,
+                "brain_csf_ratio": 0.0,
+            })
+            continue
+
+        vals = data[valid]
+        gm_v = gm[valid]
+        wm_v = wm[valid]
+        csf_v = csf[valid]
+
+        gm_w = float(gm_v.sum())
+        wm_w = float(wm_v.sum())
+        csf_w = float(csf_v.sum())
+
+        gm_conc = float((vals * gm_v).sum() / (gm_w + 1e-9))
+        wm_conc = float((vals * wm_v).sum() / (wm_w + 1e-9))
+        csf_conc = float((vals * csf_v).sum() / (csf_w + 1e-9))
+
+        brain_weight = gm_v + wm_v
+        brain_conc = float((vals * brain_weight).sum() / (float(brain_weight.sum()) + 1e-9))
+
+        records.append({
+            "label": label,
+            "n_voxels": n_vox,
+            "mean_signal": float(vals.mean()),
+            "gm_frac_mean": float(gm_v.mean()),
+            "wm_frac_mean": float(wm_v.mean()),
+            "csf_frac_mean": float(csf_v.mean()),
+            "gm_conc": gm_conc,
+            "wm_conc": wm_conc,
+            "csf_conc": csf_conc,
+            "gm_wm_ratio": gm_conc / (wm_conc + 1e-9),
+            "brain_csf_ratio": brain_conc / (csf_conc + 1e-9),
+        })
+
+    records.sort(key=lambda record: record["label"])
+    return records
+
+
+def compare_tissue_metric_states(
+    metric_states: dict[str, list[dict]],
+    labels: list[str] | None = None):
+    """Merge per-state tissue metrics into one comparison table."""
+
+    wanted = set(labels) if labels is not None else None
+    by_state = {}
+    all_labels = set()
+
+    for state_name, records in metric_states.items():
+        state_dict = {record["label"]: record for record in records}
+        by_state[state_name] = state_dict
+        all_labels.update(state_dict.keys())
+
+    if wanted is not None:
+        all_labels &= wanted
+
+    merged = []
+    for label in sorted(all_labels):
+        row = {"label": label}
+        for state_name, state_dict in by_state.items():
+            record = state_dict.get(label, {})
+            prefix = state_name.lower().replace(" ", "_")
+            row[f"{prefix}_n_voxels"] = int(record.get("n_voxels", 0))
+            row[f"{prefix}_gm_frac_mean"] = float(record.get("gm_frac_mean", 0.0))
+            row[f"{prefix}_wm_frac_mean"] = float(record.get("wm_frac_mean", 0.0))
+            row[f"{prefix}_csf_frac_mean"] = float(record.get("csf_frac_mean", 0.0))
+            row[f"{prefix}_gm_conc"] = float(record.get("gm_conc", 0.0))
+            row[f"{prefix}_wm_conc"] = float(record.get("wm_conc", 0.0))
+            row[f"{prefix}_csf_conc"] = float(record.get("csf_conc", 0.0))
+            row[f"{prefix}_gm_wm_ratio"] = float(record.get("gm_wm_ratio", 0.0))
+            row[f"{prefix}_brain_csf_ratio"] = float(record.get("brain_csf_ratio", 0.0))
+
+        row["pipeline_minus_before_gm_wm_ratio"] = (
+            row.get("pipeline_gm_wm_ratio", 0.0) - row.get("before_gm_wm_ratio", 0.0)
+        )
+        row["article_minus_before_gm_wm_ratio"] = (
+            row.get("article_gm_wm_ratio", 0.0) - row.get("before_gm_wm_ratio", 0.0)
+        )
+        row["pipeline_minus_before_brain_csf_ratio"] = (
+            row.get("pipeline_brain_csf_ratio", 0.0) - row.get("before_brain_csf_ratio", 0.0)
+        )
+        row["article_minus_before_brain_csf_ratio"] = (
+            row.get("article_brain_csf_ratio", 0.0) - row.get("before_brain_csf_ratio", 0.0)
+        )
+        merged.append(row)
+
+    return merged
+
+
+def print_tissue_metric_comparison(
+    comparison_rows: list[dict],
+    subject: str = "sub-01"):
+    """Print a compact comparison table for tissue-based metabolite metrics."""
+
+    if not comparison_rows:
+        print(f"[tissue-metrics] no rows to print for {subject}")
+        return
+
+    sep = "-" * 126
+    print(f"\n[tissue-metrics] {subject} — Before vs Pipeline vs Article")
+    print(sep)
+    print(
+        f"{'Metabolite':<14}  {'B GM/WM':>9}  {'P GM/WM':>9}  {'A GM/WM':>9}  "
+        f"{'B Brain/CSF':>11}  {'P Brain/CSF':>11}  {'A Brain/CSF':>11}"
+    )
+    print(sep)
+    for row in comparison_rows:
+        print(
+            f"{row['label']:<14}  "
+            f"{row['before_gm_wm_ratio']:>9.3f}  "
+            f"{row['pipeline_gm_wm_ratio']:>9.3f}  "
+            f"{row['article_gm_wm_ratio']:>9.3f}  "
+            f"{row['before_brain_csf_ratio']:>11.3f}  "
+            f"{row['pipeline_brain_csf_ratio']:>11.3f}  "
+            f"{row['article_brain_csf_ratio']:>11.3f}"
+        )
+    print(sep)
 
 def compute_registration_metrics(
     t1w_img: nib.Nifti1Image,

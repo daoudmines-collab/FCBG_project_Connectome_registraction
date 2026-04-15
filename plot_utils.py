@@ -1356,8 +1356,10 @@ def plot_total_pipeline_mask_comparison(
 def plot_registration_metrics(
     metrics: list,
     subj: str = "sub-01",
-    ses: str = "ses-01"):
-   
+    ses: str = "ses-01",
+    metrics_before: list | None = None,
+    metabolites: list | None = None):
+
     if not isinstance(metrics, list) or not metrics:
         print("[metrics] no metrics to plot (expected non-empty list from "
               "compute_registration_metrics()).")
@@ -1368,7 +1370,16 @@ def plot_registration_metrics(
               "expected list of dicts from compute_registration_metrics().")
         return
 
-   
+    # optional subset filter
+    if metabolites is not None:
+        keep = set(metabolites)
+        metrics = [r for r in metrics if r["label"] in keep]
+        if metrics_before is not None:
+            metrics_before = [r for r in metrics_before if r["label"] in keep]
+        if not metrics:
+            print("[metrics] no metrics remaining after metabolite filter.")
+            return
+
     labels_raw = [r["label"]    for r in metrics]
     coverage   = np.array([r["coverage"]      for r in metrics], dtype=float)
     ncc        = np.array([r["ncc"]           for r in metrics], dtype=float)
@@ -1382,17 +1393,22 @@ def plot_registration_metrics(
         return lbl
     labels = [_short(l) for l in labels_raw]
 
+    # index before-metrics by label for quick lookup
+    before_by_label = {}
+    if metrics_before:
+        before_by_label = {r["label"]: r for r in metrics_before}
+
     cmap_snr = plt.get_cmap("plasma")
     vmin_c, vmax_c = snr.min(), max(snr.max(), 1e-6)
     dot_colors = [cmap_snr((v - vmin_c) / (vmax_c - vmin_c)) for v in snr]
 
-    BG   = "#0d0d0d"
-    PAN  = "#1a1a1a"
-    GREY = "#444444"
-    TXT  = "white"
+    BG   = "white"
+    PAN  = "#f5f5f5"
+    GREY = "#cccccc"
+    TXT  = "black"
 
     n      = len(labels)
-    fig_h  = max(11, n * 0.32 + 4)   # grow with number of metabolites
+    fig_h  = max(11, n * 0.32 + 4)
 
     fig, axes = plt.subplots(
         2, 2,
@@ -1401,22 +1417,29 @@ def plot_registration_metrics(
         constrained_layout=True,
     )
 
-  
-    def _lollipop(ax, values, sort_idx, xlabel, title, ref_line=None):
+    def _lollipop(ax, values, sort_idx, xlabel, title,
+                  before_values=None, ref_line=None):
         ax.set_facecolor(PAN)
         y = np.arange(len(sort_idx))
         vlabels = [labels[i] for i in sort_idx]
         vvals   = values[sort_idx]
-        vcols   = [dot_colors[i] for i in sort_idx]
+
+        # "before" grey markers
+        if before_values is not None:
+            bvals = before_values[sort_idx]
+            ax.scatter(bvals, y, c="lightgrey", s=50, zorder=2,
+                       edgecolors="grey", linewidths=0.5,
+                       marker="D", label="Before registration")
 
         ax.hlines(y, 0, vvals, color=GREY, linewidth=1.2, zorder=1)
         sc = ax.scatter(vvals, y, c=[snr[i] for i in sort_idx],
                         cmap="plasma", vmin=vmin_c, vmax=vmax_c,
-                        s=70, zorder=3, edgecolors="white", linewidths=0.4)
+                        s=70, zorder=3, edgecolors="dimgrey", linewidths=0.4,
+                        label="After registration")
 
         if ref_line is not None:
-            ax.axvline(ref_line, color="white", linestyle="--",
-                       linewidth=0.7, alpha=0.5, zorder=2)
+            ax.axvline(ref_line, color="black", linestyle="--",
+                       linewidth=0.7, alpha=0.4, zorder=2)
 
         ax.set_yticks(y)
         ax.set_yticklabels(vlabels, color=TXT, fontsize=7.5)
@@ -1426,21 +1449,36 @@ def plot_registration_metrics(
         ax.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
         for spine in ax.spines.values():
             spine.set_edgecolor(GREY)
+        if before_values is not None:
+            ax.legend(facecolor="white", labelcolor="black", fontsize=8,
+                      loc="lower right", framealpha=0.8)
         return sc
 
-    order_ncc = np.argsort(np.abs(ncc))
+    # build before arrays aligned to labels_raw order (NaN if missing)
+    def _before_array(key):
+        if not before_by_label:
+            return None
+        return np.array(
+            [before_by_label.get(l, {}).get(key, np.nan) for l in labels_raw],
+            dtype=float)
+
+    ncc_before = _before_array("ncc")
+    nmi_before = _before_array("nmi")
+
+    order_ncc = np.argsort(-ncc)   # most negative (best) at top
     sc1 = _lollipop(axes[0, 0], ncc, order_ncc,
                     "NCC  (negative = anti-correlated, expected for MRSI vs T1w UNI-DEN)",
-                    "NCC  –  ranked by |NCC|  (↑ most anti-correlated = best)",
+                    "NCC  –  ranked by value  (most negative = best, at top)",
+                    before_values=ncc_before,
                     ref_line=0.0)
 
-    # panel 2: NMI ranked (sorted by NMI ascending so best is at top)
     order_nmi = np.argsort(nmi)
     sc2 = _lollipop(axes[0, 1], nmi, order_nmi,
                     "Normalised Mutual Information (NMI)",
-                    "NMI  –  ranked by quality  (↑ best)")
+                    "NMI  –  ranked by quality  (best at top)",
+                    before_values=nmi_before)
 
-    # shared colorbar – attached to right column so it sits at the outer right edge
+    # shared colorbar
     sm = plt.cm.ScalarMappable(cmap="plasma",
                                norm=plt.Normalize(vmin=vmin_c, vmax=vmax_c))
     sm.set_array([])
@@ -1449,23 +1487,33 @@ def plot_registration_metrics(
     cb.set_label("In-region SNR (mean/std)", color=TXT, fontsize=9)
     cb.ax.yaxis.set_tick_params(color=TXT, labelcolor=TXT)
 
-    
     def _scatter(ax, xvals, yvals, xlabel, ylabel, title,
+                 xbefore=None, ybefore=None,
                  xref=None, yref=None):
         ax.set_facecolor(PAN)
+        if xbefore is not None and ybefore is not None:
+            for xb, yb, xa, ya in zip(xbefore, ybefore, xvals, yvals):
+                if not (np.isnan(xb) or np.isnan(yb)):
+                    ax.annotate("", xy=(xa, ya), xytext=(xb, yb),
+                                arrowprops=dict(arrowstyle="-|>",
+                                                color="grey", lw=0.7, alpha=0.5))
+            ax.scatter(xbefore, ybefore, c="lightgrey", s=40, zorder=2,
+                       edgecolors="grey", linewidths=0.4, marker="D",
+                       label="Before registration")
         sc = ax.scatter(xvals, yvals, c=snr,
                         cmap="plasma", vmin=vmin_c, vmax=vmax_c,
-                        s=65, zorder=3, edgecolors="white", linewidths=0.4)
+                        s=65, zorder=3, edgecolors="dimgrey", linewidths=0.4,
+                        label="After registration")
         for i, lbl in enumerate(labels):
             ax.annotate(lbl, (xvals[i], yvals[i]),
                         textcoords="offset points", xytext=(5, 3),
-                        fontsize=6.5, color="lightgrey", zorder=4)
+                        fontsize=6.5, color="dimgrey", zorder=4)
         if xref is not None:
-            ax.axvline(xref, color="white", linestyle="--",
-                       linewidth=0.7, alpha=0.5)
+            ax.axvline(xref, color="black", linestyle="--",
+                       linewidth=0.7, alpha=0.4)
         if yref is not None:
-            ax.axhline(yref, color="white", linestyle="--",
-                       linewidth=0.7, alpha=0.5)
+            ax.axhline(yref, color="black", linestyle="--",
+                       linewidth=0.7, alpha=0.4)
         ax.set_xlabel(xlabel, color=TXT, fontsize=9)
         ax.set_ylabel(ylabel, color=TXT, fontsize=9)
         ax.set_title(title, color=TXT, fontsize=10, pad=6)
@@ -1473,15 +1521,17 @@ def plot_registration_metrics(
         ax.grid(color=GREY, linewidth=0.4, zorder=0)
         for spine in ax.spines.values():
             spine.set_edgecolor(GREY)
+        if xbefore is not None:
+            ax.legend(facecolor="white", labelcolor="black", fontsize=8,
+                      framealpha=0.8)
         return sc
 
-    # panel 3: NCC vs NMI scatter
     _scatter(axes[1, 0], ncc, nmi,
              "NCC", "NMI",
-             "NCC vs NMI  (colour = SNR)",
+             "NCC vs NMI  (colour = SNR, arrows = before -> after)",
+             xbefore=ncc_before, ybefore=nmi_before,
              xref=0.0)
 
-    # panel 4: SNR vs NCC
     _scatter(axes[1, 1], snr, ncc,
              "In-region SNR (mean/std)", "NCC",
              "SNR vs NCC  (colour = SNR)",
@@ -1494,7 +1544,7 @@ def plot_registration_metrics(
     _auto_save(fig)
     plt.show()
 
-    # print table 
+    # print table
     print(f"\n{'Label':<35}  {'Coverage':>9}  {'NCC':>8}  {'NMI':>8}  {'SNR':>8}")
     print("─" * 75)
     for r in metrics:
@@ -1541,12 +1591,12 @@ def plot_pipeline_metrics_comparison(
     snr_b = np.array([b_by_label[l].get("snr", 0.0) for l in common], dtype=float)
     labels = [_short(l) for l in common]
 
-    BG      = "#0d0d0d"
-    PAN     = "#1a1a1a"
-    GREY    = "#444444"
-    TXT     = "white"
-    COLOR_A = "#f4a261"   # orange  → BET
-    COLOR_B = "#4cc9f0"   # cyan    → FreeSurfer
+    BG      = "white"
+    PAN     = "#f5f5f5"
+    GREY    = "#cccccc"
+    TXT     = "black"
+    COLOR_A = "#e07b2a"   # orange  → BET
+    COLOR_B = "#1a7abf"   # blue    → FreeSurfer
 
     n       = len(labels)
     order_ncc = np.argsort((np.abs(ncc_a) + np.abs(ncc_b)) / 2)
@@ -1571,7 +1621,7 @@ def plot_pipeline_metrics_comparison(
                    edgecolors="white", linewidths=0.3, label=label_b)
 
         if ref_line is not None:
-            ax.axvline(ref_line, color="white", linestyle="--", linewidth=0.7, alpha=0.4, zorder=2)
+            ax.axvline(ref_line, color="black", linestyle="--", linewidth=0.7, alpha=0.4, zorder=2)
 
         ax.set_yticks(y)
         ax.set_yticklabels(_la, color=TXT, fontsize=7.5)
@@ -1581,7 +1631,8 @@ def plot_pipeline_metrics_comparison(
         ax.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
         for spine in ax.spines.values():
             spine.set_edgecolor(GREY)
-        ax.legend(facecolor="#222222", labelcolor="white", fontsize=8, loc="lower right")
+        ax.legend(facecolor="white", labelcolor="black", fontsize=8,
+                  loc="lower right", framealpha=0.8)
 
     _lollipop_pair(
         axes[0, 0], ncc_a, ncc_b, order_ncc,
@@ -1599,13 +1650,13 @@ def plot_pipeline_metrics_comparison(
     ax_sc = axes[1, 0]
     ax_sc.set_facecolor(PAN)
     for na, nb, ma, mb in zip(ncc_a, ncc_b, nmi_a, nmi_b):
-        ax_sc.plot([na, nb], [ma, mb], color="white", linewidth=0.8, alpha=0.35, zorder=2)
+        ax_sc.plot([na, nb], [ma, mb], color="grey", linewidth=0.8, alpha=0.35, zorder=2)
     # Draw FreeSurfer first (behind), then BET on top so both are always visible
     ax_sc.scatter(ncc_b, nmi_b, c=COLOR_B, s=65, marker="s", zorder=3,
                   edgecolors="white", linewidths=0.3, label=label_b, alpha=0.9)
     ax_sc.scatter(ncc_a, nmi_a, c=COLOR_A, s=75, zorder=4,
                   edgecolors="white", linewidths=0.4, label=label_a, alpha=0.9)
-    ax_sc.axvline(0, color="white", linestyle="--", linewidth=0.7, alpha=0.4)
+    ax_sc.axvline(0, color="black", linestyle="--", linewidth=0.7, alpha=0.4)
     ax_sc.set_xlabel("NCC", color=TXT, fontsize=9)
     ax_sc.set_ylabel("NMI", color=TXT, fontsize=9)
     ax_sc.set_title("NCC vs NMI  (lines connect same metabolite)", color=TXT, fontsize=10, pad=6)
@@ -1613,7 +1664,7 @@ def plot_pipeline_metrics_comparison(
     ax_sc.grid(color=GREY, linewidth=0.4, zorder=0)
     for spine in ax_sc.spines.values():
         spine.set_edgecolor(GREY)
-    ax_sc.legend(facecolor="#222222", labelcolor="white", fontsize=8)
+    ax_sc.legend(facecolor="white", labelcolor="black", fontsize=8, framealpha=0.8)
 
     # bottom-right: normalised delta bar chart (FreeSurfer − BET)
     # Each metric is normalised by its own maximum absolute delta so that
@@ -1636,7 +1687,7 @@ def plot_pipeline_metrics_comparison(
               label=f"ΔNCC  (max={ncc_max - 1e-10:.4f})", alpha=0.9, zorder=2)
     ax_d.barh(_yd + 0.2, dnmi_n, height=0.35, color=COLOR_B,
               label=f"ΔNMI  (max={nmi_max - 1e-10:.5f})", alpha=0.9, zorder=2)
-    ax_d.axvline(0, color="white", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax_d.axvline(0, color="black", linestyle="--", linewidth=0.8, alpha=0.5)
     ax_d.set_xlim(-1.35, 1.35)
     ax_d.set_yticks(_yd)
     ax_d.set_yticklabels(_ld, color=TXT, fontsize=7.5)
@@ -1649,13 +1700,14 @@ def plot_pipeline_metrics_comparison(
     ax_d.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
     for spine in ax_d.spines.values():
         spine.set_edgecolor(GREY)
-    ax_d.legend(facecolor="#222222", labelcolor="white", fontsize=8, loc="lower right")
+    ax_d.legend(facecolor="white", labelcolor="black", fontsize=8,
+                loc="lower right", framealpha=0.8)
     # Annotate when both pipelines are practically equivalent
     if ncc_max - 1e-10 < 1e-4 and nmi_max - 1e-10 < 1e-6:
         ax_d.text(0, len(_yd) / 2, "≈ equivalent pipelines",
-                  ha="center", va="center", color="white", fontsize=11,
+                  ha="center", va="center", color="black", fontsize=11,
                   alpha=0.65, style="italic",
-                  bbox=dict(facecolor="#333333", edgecolor="none", alpha=0.55, pad=4))
+                  bbox=dict(facecolor="#eeeeee", edgecolor="none", alpha=0.55, pad=4))
 
     fig.suptitle(
         f"{subj}  {ses}  –  Pipeline comparison: {label_a} vs {label_b}\n"
@@ -1743,8 +1795,8 @@ def plot_segmentation(
     ses: str = "ses-01",
     alpha: float = 0.55):
   
-    BG   = "black"
-    TXT  = "white"
+    BG   = "white"
+    TXT  = "black"
 
     tissues = [
         ("csf", "CSF",          "Blues"),
@@ -1786,7 +1838,7 @@ def plot_segmentation(
                 colorbar=True,
                 title=title,
                 axes=ax_top,
-                black_bg=True,
+                black_bg=False,
                 cmap=cmap,
                 vmax=vmax,
                 alpha=alpha,
@@ -1813,7 +1865,7 @@ def plot_segmentation(
             cut_coords=cut_coords,
             title="Hard segmentation  (1=CSF · 2=GM · 3=WM)",
             axes=ax_bot_mid,
-            black_bg=True,
+            black_bg=False,
             cmap="gist_rainbow",
             alpha=alpha,
         )
@@ -1935,28 +1987,31 @@ def plot_mrsi_sum_mask_contours(
     freesurfer_mask_img:  "nib.Nifti1Image" ,
     subj: str = "sub-01",
     ses:  str = "ses-01",
-    n_slices: int = 7):
-   
+    n_slices: int = 5):
+
     sum_data        = sum_img.get_fdata()
     water_data      = water_mask_img.get_fdata().astype(bool)
-    bet_data        = bet_mask_img.get_fdata().astype(bool)        
-    freesurfer_data = freesurfer_mask_img.get_fdata().astype(bool) 
+    bet_data        = bet_mask_img.get_fdata().astype(bool)
+    freesurfer_data = freesurfer_mask_img.get_fdata().astype(bool)
 
-    nz = sum_data.shape[2]
-    z_indices = np.linspace(0, nz - 1, n_slices, dtype=int)
-
+    nx, ny, nz = sum_data.shape
     sum_max = np.percentile(sum_data[sum_data > 0], 99) if sum_data.max() > 0 else 1.0
 
-    fig, axes = plt.subplots(1, n_slices, figsize=(3.2 * n_slices, 4), facecolor="black")
-    if n_slices == 1:
-        axes = [axes]
+    # Slice indices for each orientation, centred on the signal region
+    def _signal_range(axis):
+        coords = np.where(sum_data > 0)
+        vals = coords[axis]
+        lo, hi = int(vals.min()), int(vals.max())
+        return np.linspace(lo, hi, n_slices, dtype=int)
 
-    # Track which legend entries have already been added (by label)
+    axial_idx    = _signal_range(2)   # z-axis
+    coronal_idx  = _signal_range(1)   # y-axis
+    sagittal_idx = _signal_range(0)   # x-axis
+
     legend_seen: set = set()
     legend_handles = []
 
     def _add_contour(ax, binary_slice, color, label):
-        """Draw a contour and, the first time, add a legend entry."""
         bin_f = binary_slice.astype(float)
         if bin_f.max() > 0:
             ax.contour(bin_f, levels=[0.5], colors=[color], linewidths=1.2)
@@ -1966,205 +2021,286 @@ def plot_mrsi_sum_mask_contours(
                     plt.matplotlib.lines.Line2D([], [], color=color,
                                                 linewidth=1.5, label=label))
 
-    for ax, z in zip(axes, z_indices):
-        ax.set_facecolor("black")
-        slc = sum_data[:, :, z].T
-        ax.imshow(slc, origin="lower", cmap="gray",
+    def _draw(ax, bg_slice, sum_slice, water_slice, bet_slice, fs_slice, title):
+        ax.set_facecolor("white")
+        ax.imshow(bg_slice, origin="lower", cmap="gray",
                   vmin=0, vmax=sum_max, interpolation="nearest")
-
-        # Sum signal boundary (gold)
-        _add_contour(ax, (sum_data[:, :, z] > 0).T, "gold", "Sum signal boundary")
-
-        # Water mask (blue)
-        _add_contour(ax, water_data[:, :, z].T, "deepskyblue", "Water mask")
-
-        # BET brain mask registered to MRSI space (green)
-        if bet_data is not None:
-            _add_contour(ax, bet_data[:, :, z].T, "limegreen", "BET brain mask (reg.)")
-
-        # FreeSurfer / atlas mask registered to MRSI space (red)
-        if freesurfer_data is not None:
-            _add_contour(ax, freesurfer_data[:, :, z].T, "tomato", "FreeSurfer mask (reg.)")
-
-        ax.set_title(f"z={z}", color="white", fontsize=9)
+        _add_contour(ax, (sum_slice > 0), "darkorange",  "Sum signal boundary")
+        _add_contour(ax,  water_slice,    "steelblue",   "Water mask")
+        _add_contour(ax,  bet_slice,      "forestgreen", "BET brain mask (reg.)")
+        _add_contour(ax,  fs_slice,       "crimson",     "FreeSurfer mask (reg.)")
+        ax.set_title(title, color="black", fontsize=8)
         ax.axis("off")
 
+    row_labels = ["Axial", "Coronal", "Sagittal"]
+    fig, axes = plt.subplots(3, n_slices,
+                             figsize=(3.0 * n_slices, 9),
+                             facecolor="white")
+
+    # --- Axial (z) ---
+    for col, z in enumerate(axial_idx):
+        _draw(axes[0, col],
+              sum_data[:, :, z].T,
+              sum_data[:, :, z].T,
+              water_data[:, :, z].T,
+              bet_data[:, :, z].T,
+              freesurfer_data[:, :, z].T,
+              f"z={z}")
+
+    # --- Coronal (y) ---
+    for col, y in enumerate(coronal_idx):
+        _draw(axes[1, col],
+              sum_data[:, y, :].T,
+              sum_data[:, y, :].T,
+              water_data[:, y, :].T,
+              bet_data[:, y, :].T,
+              freesurfer_data[:, y, :].T,
+              f"y={y}")
+
+    # --- Sagittal (x) ---
+    for col, x in enumerate(sagittal_idx):
+        _draw(axes[2, col],
+              sum_data[x, :, :].T,
+              sum_data[x, :, :].T,
+              water_data[x, :, :].T,
+              bet_data[x, :, :].T,
+              freesurfer_data[x, :, :].T,
+              f"x={x}")
+
+    # Row labels on the left
+    for row, label in enumerate(row_labels):
+        axes[row, 0].set_ylabel(label, color="black", fontsize=10, rotation=90,
+                                labelpad=6)
+
     fig.suptitle(f"{subj}  {ses}  –  MRSI sum signal vs mask contours",
-                 color="white", fontsize=12)
+                 color="black", fontsize=13)
     if legend_handles:
         fig.legend(handles=legend_handles, loc="lower center", ncol=len(legend_handles),
-                   frameon=False, labelcolor="white", fontsize=9,
-                   bbox_to_anchor=(0.5, -0.04))
+                   frameon=False, labelcolor="black", fontsize=9,
+                   bbox_to_anchor=(0.5, -0.01))
     plt.tight_layout()
     _auto_save(fig)
     plt.show()
 
 
 def plot_mask_coverage_comparaison(
-    bet_mask_img:    "nib.Nifti1Image",
-    water_mask_img:  "nib.Nifti1Image",
-    t1w_ds_img:      "nib.Nifti1Image",
-    extra_mask_img:  "nib.Nifti1Image",
-    active_mask_name: str | None = None,
-    n_slices: int = 7):
+    # Registered masks (all on the same SUM_RAS/MRSI grid) — used ONLY for
+    # statistics and the comparison row.
+    bet_mask_img:      "nib.Nifti1Image",
+    water_mask_img:    "nib.Nifti1Image",
+    extra_mask_img:    "nib.Nifti1Image",
+    # Full T1w (with skull) used as background for the comparison row.
+    # Will be resampled to the registered-mask grid internally.
+    t1w_ds_img:        "nib.Nifti1Image",
+    # Native (mask, background) pairs for display rows 0-2.
+    # Each mask and its background must share the SAME native space so the
+    # contour overlaps the brain perfectly without any spatial transformation.
+    #   bet_native_mask  / bet_bg_img   -> e.g. nib.load(T1W_BRAIN_MASK_DS_PATH)  + t1w_ds_brain_img
+    #   water_native_mask / water_bg_img -> e.g. water_mask_img (native MRSI)     + water_img
+    #   extra_native_mask / extra_bg_img -> e.g. nib.load(FREESURFER_MASK_SRC_PATH) + nib.load(FREESURFER_BRAIN_SRC_PATH)
+    bet_native_mask:   "nib.Nifti1Image | None" = None,
+    bet_bg_img:        "nib.Nifti1Image | None" = None,
+    water_native_mask: "nib.Nifti1Image | None" = None,
+    water_bg_img:      "nib.Nifti1Image | None" = None,
+    extra_native_mask: "nib.Nifti1Image | None" = None,
+    extra_bg_img:      "nib.Nifti1Image | None" = None,
+    active_mask_name:  "str | None" = None):
+    """Orthogonal (axial / coronal / sagittal) mask-coverage figure.
+
+    Rows 0-2 display each mask on the exact image it was extracted from, so
+    the outline is pixel-perfect in full native resolution.  Row 3 overlays
+    the registered (co-registered to a common SUM_RAS grid) versions of every
+    mask on the full T1w to allow spatial overlap comparison.
+
+    If a native pair is not provided the registered mask is resampled onto
+    t1w_ds_img as a fallback (less precise but still functional).
+    """
+    from nibabel.processing import resample_from_to
+
+    # ── Stats — always from registered masks (common grid) ───────────────
     bet_data   = bet_mask_img.get_fdata().astype(bool)
     water_data = water_mask_img.get_fdata().astype(bool)
-    t1w_data   = t1w_ds_img.get_fdata()
-    
     extra_data = extra_mask_img.get_fdata().astype(bool)
 
-    vox_vol_mm3 = float(np.abs(np.linalg.det(bet_mask_img.affine[:3, :3])))
-
-    intersection  = bet_data & water_data
-    bet_only      = bet_data & ~water_data
-    water_only    = water_data & ~bet_data
-
-    n_bet    = int(bet_data.sum())
-    n_water  = int(water_data.sum())
-    n_inter  = int(intersection.sum())
-    n_bonly  = int(bet_only.sum())
-    n_wonly  = int(water_only.sum())
+    vox_vol_mm3  = float(np.abs(np.linalg.det(bet_mask_img.affine[:3, :3])))
+    n_bet        = int(bet_data.sum())
+    n_water      = int(water_data.sum())
+    n_extra      = int(extra_data.sum())
+    intersection = bet_data & water_data
+    n_inter      = int(intersection.sum())
+    n_bonly      = int((bet_data & ~water_data).sum())
+    n_wonly      = int((water_data & ~bet_data).sum())
 
     dice    = 2 * n_inter / (n_bet + n_water + 1e-10)
     jaccard = n_inter / (n_bet + n_water - n_inter + 1e-10)
 
-    all3_inter   = bet_data & water_data & extra_data
-    bet_extra_i  = bet_data & extra_data
-    wat_extra_i  = water_data & extra_data
-    extra_only   = extra_data & ~bet_data & ~water_data
-    n_extra      = int(extra_data.sum())
-    n_eonly      = int(extra_only.sum())
-    n_all3       = int(all3_inter.sum())
-    dice_be      = 2 * int(bet_extra_i.sum())  / (n_bet + n_extra + 1e-10)
-    dice_we      = 2 * int(wat_extra_i.sum())  / (n_water + n_extra + 1e-10)
-    jacc_be      = int(bet_extra_i.sum())  / (n_bet + n_extra - int(bet_extra_i.sum()) + 1e-10)
-    jacc_we      = int(wat_extra_i.sum())  / (n_water + n_extra - int(wat_extra_i.sum()) + 1e-10)
+    all3_inter  = bet_data & water_data & extra_data
+    bet_extra_i = bet_data & extra_data
+    wat_extra_i = water_data & extra_data
+    extra_only  = extra_data & ~bet_data & ~water_data
+    n_eonly     = int(extra_only.sum())
+    n_all3      = int(all3_inter.sum())
+    dice_be     = 2 * int(bet_extra_i.sum()) / (n_bet + n_extra + 1e-10)
+    dice_we     = 2 * int(wat_extra_i.sum()) / (n_water + n_extra + 1e-10)
+    jacc_be     = int(bet_extra_i.sum()) / (n_bet + n_extra - int(bet_extra_i.sum()) + 1e-10)
+    jacc_we     = int(wat_extra_i.sum()) / (n_water + n_extra - int(wat_extra_i.sum()) + 1e-10)
+
     # exclusive-only regions for comparison row
-    bet_excl   = bet_data  & ~water_data & ~extra_data
-    water_excl = water_data & ~bet_data  & ~extra_data
+    bet_excl    = bet_data  & ~water_data & ~extra_data
+    water_excl  = water_data & ~bet_data  & ~extra_data
     any_overlap = (bet_data.astype(np.uint8) + water_data.astype(np.uint8) +
-                       extra_data.astype(np.uint8)) >= 2
+                   extra_data.astype(np.uint8)) >= 2
 
     # ── Text table ────────────────────────────────────────────────────────
     sep = "─" * 52
     print(sep)
-    print(f"  Mask comparison (MRSI grid)")
+    print(f"  Mask comparison  (registered → SUM_RAS grid)")
     print(sep)
-    print(f"  BET mask volume      : {n_bet   * vox_vol_mm3/1000:>8.1f} mL  ({n_bet:>6} vox)")
-    print(f"  Water mask volume    : {n_water * vox_vol_mm3/1000:>8.1f} mL  ({n_water:>6} vox)")
-    
-    print(f"  FREESURFER mask volume : {n_extra * vox_vol_mm3/1000:>8.1f} mL  ({n_extra:>6} vox)")
+    print(f"  BET mask          : {n_bet   * vox_vol_mm3/1000:>7.1f} mL  ({n_bet:>6} vox)")
+    print(f"  Water mask        : {n_water * vox_vol_mm3/1000:>7.1f} mL  ({n_water:>6} vox)")
+    print(f"  FreeSurfer mask   : {n_extra * vox_vol_mm3/1000:>7.1f} mL  ({n_extra:>6} vox)")
     print(sep)
-    print(f"  BET ∩ Water          : {n_inter * vox_vol_mm3/1000:>8.1f} mL  ({n_inter:>6} vox)")
-    print(f"  BET-only voxels      : {n_bonly * vox_vol_mm3/1000:>8.1f} mL  ({n_bonly:>6} vox)")
-    print(f"  Water-only voxels    : {n_wonly * vox_vol_mm3/1000:>8.1f} mL  ({n_wonly:>6} vox)")
-    print(f"  Dice  BET/Water      : {dice:.4f}  Jaccard: {jaccard:.4f}")
-  
-    print(f"  Dice  BET/FREESURFER : {dice_be:.4f}  Jaccard: {jacc_be:.4f}")
-    print(f"  Dice  Water/FREESURFER : {dice_we:.4f}  Jaccard: {jacc_we:.4f}")
-    print(f"  All-3 intersection   : {n_all3 * vox_vol_mm3/1000:>8.1f} mL  ({n_all3:>6} vox)")
-    print(f"  FREESURFERmask-only voxels : {n_eonly * vox_vol_mm3/1000:>8.1f} mL  ({n_eonly:>6} vox)")
-    print(f"  BET ≡ Water          : {bool(np.array_equal(bet_data, water_data))}")
+    print(f"  BET ∩ Water       : {n_inter * vox_vol_mm3/1000:>7.1f} mL  ({n_inter:>6} vox)")
+    print(f"  BET-only voxels   : {n_bonly * vox_vol_mm3/1000:>7.1f} mL  ({n_bonly:>6} vox)")
+    print(f"  Water-only voxels : {n_wonly * vox_vol_mm3/1000:>7.1f} mL  ({n_wonly:>6} vox)")
+    print(f"  Dice  BET/Water      : {dice:.4f}   Jaccard: {jaccard:.4f}")
+    print(f"  Dice  BET/FreeSurfer : {dice_be:.4f}   Jaccard: {jacc_be:.4f}")
+    print(f"  Dice  Water/FreeSurfer : {dice_we:.4f}   Jaccard: {jacc_we:.4f}")
+    print(f"  All-3 intersection : {n_all3 * vox_vol_mm3/1000:>7.1f} mL  ({n_all3:>6} vox)")
+    print(f"  FS-only voxels    : {n_eonly * vox_vol_mm3/1000:>7.1f} mL  ({n_eonly:>6} vox)")
+    print(f"  BET ≡ Water       : {bool(np.array_equal(bet_data, water_data))}")
     print(sep)
     if active_mask_name:
         print(f"\n  ACTIVE mask for Reg 18 : {active_mask_name}")
 
-    # ── Axial mosaic ──────────────────────────────────────────────────────
-    nz = bet_data.shape[2]
-    z_indices = np.linspace(0, nz - 1, n_slices, dtype=int)
+    # ── Per-row helper: render mask on background in bg's own native space ─
+    def _row_data(native_mask, bg):
+        """Return (mask_bool_array, bg_float_array, cx, cy, cz).
 
-    t1w_max = np.percentile(t1w_data[t1w_data > 0], 99) if t1w_data.max() > 0 else 1.0
+        The mask is resampled onto the bg grid with nearest-neighbor only when
+        their grids differ (usually they are already identical for native pairs).
+        Center indices are derived from the background's own shape.
+        """
+        bg_data = bg.get_fdata()
+        if (native_mask.shape != bg.shape or
+                not np.allclose(native_mask.affine, bg.affine, atol=1e-3)):
+            mk_rs = resample_from_to(native_mask, bg, order=0)
+        else:
+            mk_rs = native_mask
+        mk_data = mk_rs.get_fdata().astype(bool)
+        cx, cy, cz = [s // 2 for s in bg.shape]
+        return mk_data, bg_data, cx, cy, cz
 
-    n_rows = 4 
-    fig_h  = 3.0 * n_rows
-    fig, axes = plt.subplots(n_rows, n_slices,
-                             figsize=(2.8 * n_slices, fig_h),
+    def _vmax(data):
+        pos = data[data > 0]
+        return float(np.nanpercentile(pos, 99)) if pos.size > 0 else 1.0
+
+    def _slc(data, cx, cy, cz, col):
+        if col == 0:
+            return data[:, :, cz].T
+        elif col == 1:
+            return data[:, cy, :].T
+        else:
+            return data[cx, :, :].T
+
+    # Resolve display sources for rows 0-2 (native pairs preferred)
+    # Row 0 – BET
+    if bet_native_mask is not None and bet_bg_img is not None:
+        b_mk, b_bg, b_cx, b_cy, b_cz = _row_data(bet_native_mask, bet_bg_img)
+    else:
+        b_mk, b_bg, b_cx, b_cy, b_cz = _row_data(bet_mask_img, t1w_ds_img)
+
+    # Row 1 – Water
+    if water_native_mask is not None and water_bg_img is not None:
+        w_mk, w_bg, w_cx, w_cy, w_cz = _row_data(water_native_mask, water_bg_img)
+    else:
+        w_mk, w_bg, w_cx, w_cy, w_cz = _row_data(water_mask_img, t1w_ds_img)
+
+    # Row 2 – FreeSurfer / SynthStrip
+    if extra_native_mask is not None and extra_bg_img is not None:
+        e_mk, e_bg, e_cx, e_cy, e_cz = _row_data(extra_native_mask, extra_bg_img)
+    else:
+        e_mk, e_bg, e_cx, e_cy, e_cz = _row_data(extra_mask_img, t1w_ds_img)
+
+    # Row 3 – Comparison: registered masks on full T1w resampled to registered grid
+    cmp_bg_data = resample_from_to(t1w_ds_img, bet_mask_img, order=1).get_fdata()
+    c_cx, c_cy, c_cz = [s // 2 for s in bet_data.shape]
+
+    # ── Plot: 4 rows × 3 columns ──────────────────────────────────────────
+    n_rows, n_cols = 4, 3
+    view_labels = ["Axial", "Coronal", "Sagittal"]
+    row_labels  = [
+        "BET mask\n(BET skull-stripped DS T1w)",
+        "Water mask\n(water signal)",
+        "FreeSurfer mask\n(SynthStrip skull-stripped T1w)",
+        "Comparison\n(registered masks, full T1w bg)",
+    ]
+
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(5 * n_cols, 4.5 * n_rows),
                              facecolor="black")
 
-    row_labels = ["BET mask", "Water mask","freeSurfer mask", "Comparison"]
-
-    for col, z in enumerate(z_indices):
-        t1w_slc = t1w_data[:, :, z].T
-        bet_slc = bet_data[:, :, z].T.astype(float)
-        wat_slc = water_data[:, :, z].T.astype(float)
-
-        # Row 0 – BET mask on T1w
+    for col in range(n_cols):
+        # ── Row 0: BET ────────────────────────────────────────────────────
         ax = axes[0, col]
         ax.set_facecolor("black")
-        ax.imshow(t1w_slc, origin="lower", cmap="gray",
-                  vmin=0, vmax=t1w_max, interpolation="nearest")
-        ax.imshow(np.ma.masked_where(bet_slc == 0, bet_slc),
-                  origin="lower", cmap="Greens", vmin=0, vmax=1,
-                  alpha=0.55, interpolation="nearest")
-        ax.set_title(f"z={z}", color="white", fontsize=8)
+        ax.imshow(_slc(b_bg, b_cx, b_cy, b_cz, col),
+                  origin="lower", cmap="gray", vmin=0, vmax=_vmax(b_bg), interpolation="nearest")
+        mk_s = _slc(b_mk.astype(float), b_cx, b_cy, b_cz, col)
+        ax.imshow(np.ma.masked_where(mk_s == 0, mk_s),
+                  origin="lower", cmap="Greens", vmin=0, vmax=1, alpha=0.55, interpolation="nearest")
+        ax.set_title(view_labels[col], color="white", fontsize=11)
         ax.axis("off")
 
-        # Row 1 – Water mask on T1w
+        # ── Row 1: Water ──────────────────────────────────────────────────
         ax = axes[1, col]
         ax.set_facecolor("black")
-        ax.imshow(t1w_slc, origin="lower", cmap="gray",
-                  vmin=0, vmax=t1w_max, interpolation="nearest")
-        ax.imshow(np.ma.masked_where(wat_slc == 0, wat_slc),
-                  origin="lower", cmap="Blues", vmin=0, vmax=1,
-                  alpha=0.55, interpolation="nearest")
+        ax.imshow(_slc(w_bg, w_cx, w_cy, w_cz, col),
+                  origin="lower", cmap="gray", vmin=0, vmax=_vmax(w_bg), interpolation="nearest")
+        mk_s = _slc(w_mk.astype(float), w_cx, w_cy, w_cz, col)
+        ax.imshow(np.ma.masked_where(mk_s == 0, mk_s),
+                  origin="lower", cmap="Blues", vmin=0, vmax=1, alpha=0.55, interpolation="nearest")
         ax.axis("off")
 
-       
-        # Row 2 – Extra mask on T1w
-        ext_slc = extra_data[:, :, z].T.astype(float)
+        # ── Row 2: FreeSurfer / SynthStrip ────────────────────────────────
         ax = axes[2, col]
         ax.set_facecolor("black")
-        ax.imshow(t1w_slc, origin="lower", cmap="gray",
-                      vmin=0, vmax=t1w_max, interpolation="nearest")
-        ax.imshow(np.ma.masked_where(ext_slc == 0, ext_slc),
-                      origin="lower", cmap="Oranges", vmin=0, vmax=1,
-                      alpha=0.55, interpolation="nearest")
+        ax.imshow(_slc(e_bg, e_cx, e_cy, e_cz, col),
+                  origin="lower", cmap="gray", vmin=0, vmax=_vmax(e_bg), interpolation="nearest")
+        mk_s = _slc(e_mk.astype(float), e_cx, e_cy, e_cz, col)
+        ax.imshow(np.ma.masked_where(mk_s == 0, mk_s),
+                  origin="lower", cmap="Oranges", vmin=0, vmax=1, alpha=0.55, interpolation="nearest")
         ax.axis("off")
 
-        # Last row – Comparison
-        ax = axes[n_rows - 1, col]
+        # ── Row 3: Comparison ─────────────────────────────────────────────
+        ax = axes[3, col]
         ax.set_facecolor("black")
-        ax.imshow(t1w_slc, origin="lower", cmap="gray",
-                  vmin=0, vmax=t1w_max, alpha=0.25, interpolation="nearest")
+        ax.imshow(_slc(cmp_bg_data, c_cx, c_cy, c_cz, col),
+                  origin="lower", cmap="gray", vmin=0, vmax=_vmax(cmp_bg_data),
+                  alpha=0.25, interpolation="nearest")
+        for arr, cmap_, alpha_ in [
+            (any_overlap.astype(float), "gray",    0.55),
+            (extra_only.astype(float),  "Oranges", 0.80),
+            (water_excl.astype(float),  "Blues",   0.80),
+            (bet_excl.astype(float),    "Reds",    0.80),
+        ]:
+            sl = _slc(arr, c_cx, c_cy, c_cz, col)
+            ax.imshow(np.ma.masked_where(sl == 0, sl),
+                      origin="lower", cmap=cmap_, vmin=0, vmax=1,
+                      alpha=alpha_, interpolation="nearest")
+        ax.axis("off")
 
-        
-        # any pairwise/triple overlap = grey
-        ov = any_overlap[:, :, z].T.astype(float)
-        ax.imshow(np.ma.masked_where(ov == 0, ov),
-                      origin="lower", cmap="gray", vmin=0, vmax=1,
-                      alpha=0.55, interpolation="nearest")
-        # extra-only (orange)
-        eo = extra_only[:, :, z].T.astype(float)
-        ax.imshow(np.ma.masked_where(eo == 0, eo),
-                      origin="lower", cmap="Oranges", vmin=0, vmax=1,
-                      alpha=0.80, interpolation="nearest")
-        # water-excl (blue)
-        we = water_excl[:, :, z].T.astype(float)
-        ax.imshow(np.ma.masked_where(we == 0, we),
-                      origin="lower", cmap="Blues", vmin=0, vmax=1,
-                      alpha=0.80, interpolation="nearest")
-        # bet-excl (red)
-        be = bet_excl[:, :, z].T.astype(float)
-        ax.imshow(np.ma.masked_where(be == 0, be),
-                      origin="lower", cmap="Reds", vmin=0, vmax=1,
-                      alpha=0.80, interpolation="nearest")
-       
     for row, lbl in enumerate(row_labels):
-        axes[row, 0].set_ylabel(lbl, color="white", fontsize=10,
-                                rotation=90, labelpad=6)
+        axes[row, 0].set_ylabel(lbl, color="white", fontsize=9, rotation=90, labelpad=6)
 
     legend_patches = [
-            plt.matplotlib.patches.Patch(color="red",        label=f"BET only ({int(bet_excl.sum()):,} vox)"),
-            plt.matplotlib.patches.Patch(color="dodgerblue", label=f"Water only ({int(water_excl.sum()):,} vox)"),
-            plt.matplotlib.patches.Patch(color="darkorange",  label=f"Freesurfer mask only ({n_eonly:,} vox)"),
-            plt.matplotlib.patches.Patch(color="grey",        label=f"Any overlap ({int(any_overlap.sum()):,} vox)"),
-        ]
-    title = (f"BET / Water / Freesurfer mask comparison (MRSI grid)  |  "
-                 f"Dice BET-Water={dice:.3f}  BET-Freesurfer={dice_be:.3f}  "
-                 f"Water-Freesurfer={dice_we:.3f}")
-    
-    title = (f"BET mask vs water mask (MRSI grid)  |  "
-                 f"Dice={dice:.3f}  Jaccard={jaccard:.3f}")
+        plt.matplotlib.patches.Patch(color="red",        label=f"BET only ({int(bet_excl.sum()):,} vox)"),
+        plt.matplotlib.patches.Patch(color="dodgerblue", label=f"Water only ({int(water_excl.sum()):,} vox)"),
+        plt.matplotlib.patches.Patch(color="darkorange",  label=f"FreeSurfer only ({n_eonly:,} vox)"),
+        plt.matplotlib.patches.Patch(color="grey",        label=f"Any overlap ({int(any_overlap.sum()):,} vox)"),
+    ]
+    title = (f"BET / Water / FreeSurfer mask comparison  |  "
+             f"Dice BET-Water={dice:.3f}  BET-FS={dice_be:.3f}  Water-FS={dice_we:.3f}")
     if active_mask_name:
         title += f"  |  Active: {active_mask_name}"
     fig.suptitle(title, color="white", fontsize=10)
@@ -2502,5 +2638,367 @@ def plot_tissue_metabolite_metrics(
         color=TXT, fontsize=10, y=1.01,
     )
     plt.tight_layout()
+    _auto_save(fig)
+    plt.show()
+
+
+def plot_tissue_metric_comparison(
+    comparison_rows: list[dict],
+    metabolites: list[str] | None = None,
+    subj: str = "sub-01",
+    ses: str = "ses-01"):
+    """Grouped dot plot comparing tissue-based metabolite metrics across three states.
+
+    Left panel  : GM / WM PVE-weighted mean concentration ratio per metabolite.
+    Right panel : Brain (GM+WM) / CSF PVE-weighted mean concentration ratio per metabolite.
+
+    Each row shows three markers: Before (◆ grey), Our pipeline (● blue),
+    Article pipeline (■ red).  Thin arrows connect Before → each registered state
+    to show direction and magnitude of change.
+
+    Parameters
+    ----------
+    comparison_rows : list[dict]
+        Output of ``compare_tissue_metric_states()``.
+    metabolites : list[str] | None
+        Subset of metabolite labels to display.  Default: all rows.
+    subj, ses : str
+        Subject / session labels used in the figure title.
+    """
+    if not comparison_rows:
+        print("[tissue-metrics] no data to plot.")
+        return
+
+    if metabolites is not None:
+        keep = set(metabolites)
+        comparison_rows = [r for r in comparison_rows if r["label"] in keep]
+        # preserve the requested order
+        order = {lbl: i for i, lbl in enumerate(metabolites)}
+        comparison_rows = sorted(comparison_rows, key=lambda r: order.get(r["label"], 999))
+
+    labels = [row["label"] for row in comparison_rows]
+    n      = len(labels)
+
+    BG   = "white"
+    PAN  = "#f5f5f5"
+    GREY = "#cccccc"
+    TXT  = "black"
+    C_BEFORE   = "#9e9e9e"
+    C_PIPELINE = "#1976d2"
+    C_ARTICLE  = "#e53935"
+
+    y     = np.arange(n)
+    fig_h = max(5, n * 0.48 + 2.5)
+
+    fig, axes = plt.subplots(
+        1, 3,
+        figsize=(22, fig_h),
+        facecolor=BG,
+        constrained_layout=True,
+    )
+
+    def _panel(ax, metric_key, xlabel, title, legend_loc="upper right", rows=None):
+        _rows   = rows if rows is not None else comparison_rows
+        _labels = [row["label"] for row in _rows]
+        _n      = len(_labels)
+        _y      = np.arange(_n)
+
+        ax.set_facecolor(PAN)
+
+        before_v   = np.array([row.get(f"before_{metric_key}",   0.0) for row in _rows])
+        pipeline_v = np.array([row.get(f"pipeline_{metric_key}", 0.0) for row in _rows])
+        article_v  = np.array([row.get(f"article_{metric_key}",  0.0) for row in _rows])
+
+        # thin arrows: Before → Pipeline and Before → Article
+        for i in range(_n):
+            for end_v, col in [(pipeline_v[i], C_PIPELINE), (article_v[i], C_ARTICLE)]:
+                if abs(end_v - before_v[i]) > 1e-6:
+                    ax.annotate(
+                        "", xy=(end_v, _y[i]), xytext=(before_v[i], _y[i]),
+                        arrowprops=dict(
+                            arrowstyle="-|>", color=col, lw=0.9,
+                            alpha=0.45, mutation_scale=9,
+                        ),
+                    )
+
+        ax.scatter(before_v,   _y, c=C_BEFORE,   s=70, zorder=4,
+                   edgecolors="dimgrey", linewidths=0.5, marker="D",
+                   label="Before (unregistered)")
+        ax.scatter(pipeline_v, _y, c=C_PIPELINE, s=70, zorder=5,
+                   edgecolors="darkblue", linewidths=0.5, marker="o",
+                   label="Our pipeline (Reg-17)")
+        ax.scatter(article_v,  _y, c=C_ARTICLE,  s=70, zorder=5,
+                   edgecolors="darkred",  linewidths=0.5, marker="s",
+                   label="Article pipeline (SyN)")
+
+        ax.set_yticks(_y)
+        ax.set_yticklabels(_labels, color=TXT, fontsize=8.5)
+        ax.set_xlabel(xlabel, color=TXT, fontsize=9)
+        ax.set_title(title, color=TXT, fontsize=10, pad=6)
+        ax.tick_params(colors=TXT, labelsize=8)
+        ax.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(GREY)
+        ax.legend(facecolor="white", labelcolor="black", fontsize=8.5,
+                  loc=legend_loc, framealpha=0.9)
+
+    _panel(
+        axes[0],
+        "gm_wm_ratio",
+        "GM / WM ratio  (PVE-weighted mean conc.)\n"
+        "Each voxel weighted by its FAST GM or WM partial volume fraction\n"
+        ">1 = GM-dominant  |  <1 = WM-dominant",
+        "GM / WM ratio  –  Before  ◆ → ●  Pipeline  ■  Article",
+        legend_loc="upper right",
+    )
+    _panel(
+        axes[1],
+        "brain_csf_ratio",
+        "Brain (GM+WM) / CSF ratio  (PVE-weighted mean conc.)\n"
+        "Each voxel weighted by its FAST (GM+WM) or CSF partial volume fraction\n"
+        "(higher = less CSF partial-volume contamination)",
+        "Brain / CSF ratio  –  Before  ◆ → ●  Pipeline  ■  Article",
+        legend_loc="upper left",
+    )
+    # CSF panel: exclude WaterSignal (water reference has no meaningful CSF concentration)
+    _csf_rows = [r for r in comparison_rows if r["label"] != "WaterSignal"]
+    _panel(
+        axes[2],
+        "csf_conc",
+        "CSF PVE-weighted mean concentration\n"
+        "Each voxel weighted by its FAST CSF partial volume fraction\n"
+        "(lower = less metabolite signal attributed to CSF)",
+        "CSF concentration  –  Before  ◆ → ●  Pipeline  ■  Article",
+        legend_loc="upper left",
+        rows=_csf_rows,
+    )
+
+    fig.suptitle(
+        f"{subj}  {ses}  –  Tissue-based metabolite concentration metrics\n"
+        "Per-metabolite GM/WM ratio, Brain/CSF ratio and CSF concentration across three registration states",
+        color=TXT, fontsize=11,
+    )
+    _auto_save(fig)
+    plt.show()
+
+
+def plot_tissue_slope_comparison(
+    comparison_rows: list[dict],
+    metabolites: list[str] | None = None,
+    reference_gm_wm: dict[str, tuple[float, float, float]] | None = None,
+    subj: str = "sub-01",
+    ses: str = "ses-01"):
+    """Slope graphs comparing GM/WM ratio Before vs After each registration pipeline.
+
+    Creates 2 side-by-side panels:
+      Left  : Before → Our pipeline (Reg-17)
+      Right : Before → Article pipeline (SyN)
+
+    For each metabolite a slope line is drawn connecting the Before value to
+    the After value.  A horizontal reference band from the literature can be
+    overlaid per metabolite.
+
+    Parameters
+    ----------
+    comparison_rows : list[dict]
+        Output of ``compare_tissue_metric_states()``.
+    metabolites : list[str] | None
+        Subset of metabolite labels to plot.  Default: all rows.
+    reference_gm_wm : dict[str, tuple[float, float, float]] | None
+        Maps metabolite label → (mean, lo, hi) ground-truth GM/WM ratio
+        from the literature.  E.g.::
+
+            {'NAA': (1.02, 0.98, 1.11), 'Cr': (1.22, 1.17, 1.34)}
+    subj, ses : str
+        Subject / session labels used in the figure title.
+    """
+    if not comparison_rows:
+        print("[tissue-slope] no data to plot.")
+        return
+
+    if metabolites is not None:
+        keep = set(metabolites)
+        rows = [r for r in comparison_rows if r["label"] in keep]
+    else:
+        rows = list(comparison_rows)
+
+    if not rows:
+        print("[tissue-slope] no rows remaining after metabolite filter.")
+        return
+
+    BG    = "white"
+    PAN   = "#f8f8f8"
+    GREY  = "#cccccc"
+    TXT   = "black"
+
+    # Per-metabolite colours (extend with tab10 if needed)
+    _BASE_COLORS = {
+        "NAA":  "#1976d2",
+        "Cr":   "#e53935",
+        "PCr":  "#e53935",
+        "Glu":  "#43a047",
+        "Tau":  "#8e24aa",
+        "Ala":  "#fb8c00",
+        "Gly":  "#00acc1",
+    }
+    _cmap = plt.get_cmap("tab10")
+    met_colors: dict[str, str] = {}
+    unnamed_idx = 0
+    for row in rows:
+        lbl = row["label"]
+        if lbl in _BASE_COLORS:
+            met_colors[lbl] = _BASE_COLORS[lbl]
+        else:
+            met_colors[lbl] = _cmap(unnamed_idx % 10)
+            unnamed_idx += 1
+
+    # Reference colours match metabolite colours
+    ref_colors = {lbl: met_colors.get(lbl, "#888888")
+                  for lbl in (reference_gm_wm or {})}
+
+    # --- Layout ---------------------------------------------------------------
+    fig, axes = plt.subplots(
+        1, 2,
+        figsize=(13, max(4.5, len(rows) * 1.8 + 2.5)),
+        facecolor=BG,
+        constrained_layout=True,
+    )
+
+    panels = [
+        ("Before", "Our pipeline\n(Reg-17)", "pipeline"),
+        ("Before", "Article pipeline\n(SyN)",  "article"),
+    ]
+
+    x_left, x_right = 0.22, 0.78   # x positions for the two "poles"
+    x_margin = 0.06                 # extra space for labels beyond poles
+    label_offset = 0.015            # nudge along y for overlapping labels
+
+    for ax, (lbl_left, lbl_right, state_key) in zip(axes, panels):
+        ax.set_facecolor(PAN)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.spines["left"].set_visible(True)
+        ax.spines["left"].set_edgecolor(GREY)
+
+        # Collect all y-values to set axis limits
+        all_y = []
+        for row in rows:
+            all_y += [row["before_gm_wm_ratio"], row[f"{state_key}_gm_wm_ratio"]]
+        if reference_gm_wm:
+            for _, (mn, lo, hi) in reference_gm_wm.items():
+                all_y += [lo, hi]
+        span = max(all_y) - min(all_y) if all_y else 1.0
+        pad  = max(span * 0.25, 0.15)
+        y_min = min(all_y) - pad
+        y_max = max(all_y) + pad
+
+        # --- Reference horizontal bands ---
+        if reference_gm_wm:
+            for met_lbl, (mn_r, lo_r, hi_r) in reference_gm_wm.items():
+                col = ref_colors.get(met_lbl, "#888888")
+                ax.axhspan(lo_r, hi_r, alpha=0.12, color=col, zorder=0,
+                           label=f"Ref {met_lbl} [{lo_r:.2f}–{hi_r:.2f}] (Table 2)")
+                ax.axhline(mn_r, color=col, linestyle="--", linewidth=1.2,
+                           alpha=0.55, zorder=1)
+                ax.text(x_right + x_margin + 0.01, mn_r,
+                        f"  Ref {met_lbl}\n  {mn_r:.2f}",
+                        color=col, fontsize=7.5, va="center", ha="left",
+                        transform=ax.transData)
+
+        # --- Compute y-nudges to avoid overlapping endpoint labels -----------
+        # Build per-side value lists and offset duplicates
+        def _nudge_dict(vals: list[float]) -> dict[int, float]:
+            """Return {index: nudge} so close values are offset."""
+            order = sorted(range(len(vals)), key=lambda i: vals[i])
+            nudges = [0.0] * len(vals)
+            threshold = span * 0.07
+            for k in range(1, len(order)):
+                i_prev = order[k - 1]
+                i_curr = order[k]
+                if abs(vals[i_curr] - vals[i_prev]) < threshold:
+                    nudges[i_curr] = nudges[i_prev] + threshold
+            return {i: nudges[i] for i in range(len(vals))}
+
+        y0_vals = [row["before_gm_wm_ratio"]          for row in rows]
+        y1_vals = [row[f"{state_key}_gm_wm_ratio"]    for row in rows]
+        nud0 = _nudge_dict(y0_vals)
+        nud1 = _nudge_dict(y1_vals)
+
+        # --- Draw slope lines -------------------------------------------------
+        for idx, row in enumerate(rows):
+            lbl   = row["label"]
+            y0    = row["before_gm_wm_ratio"]
+            y1    = row[f"{state_key}_gm_wm_ratio"]
+            col   = met_colors[lbl]
+            n0    = nud0[idx]
+            n1    = nud1[idx]
+
+            # Slope line (use actual values, not nudged, for the line itself)
+            ax.plot(
+                [x_left, x_right],
+                [y0, y1],
+                color=col, linewidth=2.2, zorder=3, solid_capstyle="round",
+            )
+            # Dots at endpoints
+            ax.scatter([x_left, x_right], [y0, y1],
+                       s=110, color=col, zorder=4,
+                       edgecolors="white", linewidths=1.8)
+
+            # Left label (Before) — align right of the pole
+            ax.text(x_left - 0.025, y0 + n0,
+                    f"{lbl}  {y0:.3f}",
+                    color=col, fontsize=9, fontweight="bold",
+                    va="center", ha="right", zorder=5)
+
+            # Right label (After) — align left of the pole
+            ax.text(x_right + 0.025, y1 + n1,
+                    f"{y1:.3f}  {lbl}",
+                    color=col, fontsize=9, fontweight="bold",
+                    va="center", ha="left", zorder=5)
+
+            # Small delta annotation near midpoint
+            delta = y1 - y0
+            sign  = "▲" if delta > 0 else "▼"
+            mid_x = (x_left + x_right) / 2
+            mid_y = (y0 + y1) / 2
+            ax.text(mid_x, mid_y + span * 0.04,
+                    f"{sign}{abs(delta):.3f}",
+                    color=col, fontsize=7.5, va="bottom", ha="center",
+                    alpha=0.85, zorder=5)
+
+        # --- Vertical "poles" -------------------------------------------------
+        ax.axvline(x_left,  color="#aaaaaa", linewidth=2.0, zorder=2)
+        ax.axvline(x_right, color="#aaaaaa", linewidth=2.0, zorder=2)
+
+        # --- Axis formatting --------------------------------------------------
+        ax.set_xlim(x_left - x_margin - 0.2, x_right + x_margin + 0.15)
+        ax.set_ylim(y_min, y_max)
+        ax.set_xticks([x_left, x_right])
+        ax.set_xticklabels([lbl_left, lbl_right],
+                           fontsize=10.5, fontweight="bold", color=TXT)
+        ax.tick_params(axis="x", length=0, pad=8)
+        ax.tick_params(axis="y", colors=TXT, labelsize=8)
+        ax.set_ylabel("GM / WM ratio  (FAST PVE-weighted mean concentration)", color=TXT, fontsize=9)
+        ax.yaxis.grid(True, color=GREY, linewidth=0.4, zorder=0)
+
+        # Reference legend (only on first panel to avoid double)
+        if reference_gm_wm and ax is axes[0]:
+            from matplotlib.patches import Patch
+            legend_els = [
+                Patch(facecolor=ref_colors.get(met_lbl, "#888"),
+                      alpha=0.3,
+                      label=f"Lit. range {met_lbl}: [{lo_r:.2f}–{hi_r:.2f}]")
+                for met_lbl, (_, lo_r, hi_r) in reference_gm_wm.items()
+            ]
+            ax.legend(handles=legend_els, fontsize=8.5, facecolor="white",
+                      labelcolor="black", framealpha=0.9, loc="best",
+                      title="Reference (Table 2,\n18–30 yr)", title_fontsize=7.5)
+
+    fig.suptitle(
+        f"{subj}  {ses}  –  GM/WM ratio slope:  Before → After registration\n"
+        "Dashed line = literature mean  |  band = literature range  "
+        "(Table 2, 18–30 yr, multi-region)",
+        color=TXT, fontsize=11,
+    )
     _auto_save(fig)
     plt.show()
