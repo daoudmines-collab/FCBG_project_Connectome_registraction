@@ -22,6 +22,7 @@ from registration_utils import (
     apply_transforms_multi,
     run_total_pipeline,
     compute_registration_metrics,
+    compute_image_quality_metrics,
     prepare_tissue_fraction_maps,
     compute_tissue_concentration_metrics,
     compare_tissue_metric_states,
@@ -536,6 +537,10 @@ t1w_brain_in_sum_ras_img = t1w_brain_in_sum_ras_img_bet_mask
 brain_sum_ras_transforms  = brain_sum_ras_transforms_bet_mask
 final_reg_imgs            = final_reg_imgs_bet_mask
 
+# Image quality metrics (FBER + EFC) for BET and FS pipelines
+iqm_metrics               = compute_image_quality_metrics(t1w_ds_brain_img, final_reg_imgs_bet_mask)
+iqm_metrics_freesurfer    = compute_image_quality_metrics(t1w_ds_brain_img, final_reg_imgs_freesurfer_mask)
+
 # ── Before-registration baseline ──────────────────────────────────────────────
 # Raw MRSI maps simply resampled (no transform) to the DS T1w grid.
 # Used as a "before" baseline when plotting metrics.
@@ -557,6 +562,7 @@ _raw_mrsi_dict["WaterSignal"] = nib.Nifti1Image(
     np.array(_water_raw_ds.dataobj, dtype=np.float32),
     t1w_ds_brain_img.affine, t1w_ds_brain_img.header)
 metrics_before = compute_registration_metrics(t1w_ds_brain_img, _raw_mrsi_dict)
+iqm_metrics_before = compute_image_quality_metrics(t1w_ds_brain_img, _raw_mrsi_dict)
 
 # ── Toolbox (article) pipeline metrics ────────────────────────────────────────
 # Apply the toolbox SyN + affine forward transforms (MRSI → T1w) to every
@@ -598,9 +604,11 @@ if os.path.exists(_TOOLBOX_SYN_PATH) and os.path.exists(_TOOLBOX_AFF_PATH):
     if _water_tb_img is not None:
         _toolbox_mrsi_dict["WaterSignal"] = _water_tb_img
     metrics_toolbox = compute_registration_metrics(t1w_ds_brain_img, _toolbox_mrsi_dict)
+    iqm_metrics_toolbox = compute_image_quality_metrics(t1w_ds_brain_img, _toolbox_mrsi_dict)
 else:
     print(f"  [toolbox] transforms not found at {_TOOLBOX_XFM_DIR}, skipping metrics_toolbox")
     metrics_toolbox = []
+    iqm_metrics_toolbox = []
 
 # ── Tissue-fraction metabolite comparison: before vs our pipeline vs article ──
 def _is_tissue_metric_metabolite(label: str):

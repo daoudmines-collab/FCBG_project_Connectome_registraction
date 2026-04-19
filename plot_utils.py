@@ -1358,6 +1358,9 @@ def plot_registration_metrics(
     subj: str = "sub-01",
     ses: str = "ses-01",
     metrics_before: list | None = None,
+    metrics_b: list | None = None,
+    label_a: str = "Our pipeline (Reg-17)",
+    label_b: str = "Toolbox SyN",
     metabolites: list | None = None):
 
     if not isinstance(metrics, list) or not metrics:
@@ -1370,185 +1373,120 @@ def plot_registration_metrics(
               "expected list of dicts from compute_registration_metrics().")
         return
 
-    # optional subset filter
+    # optional subset / ordering filter
     if metabolites is not None:
         keep = set(metabolites)
-        metrics = [r for r in metrics if r["label"] in keep]
+        order_map = {lbl: i for i, lbl in enumerate(metabolites)}
+        metrics        = sorted([r for r in metrics        if r["label"] in keep], key=lambda r: order_map.get(r["label"], 999))
         if metrics_before is not None:
             metrics_before = [r for r in metrics_before if r["label"] in keep]
-        if not metrics:
-            print("[metrics] no metrics remaining after metabolite filter.")
-            return
+        if metrics_b is not None:
+            metrics_b      = [r for r in metrics_b      if r["label"] in keep]
+    if not metrics:
+        print("[metrics] no metrics remaining after metabolite filter.")
+        return
 
-    labels_raw = [r["label"]    for r in metrics]
-    coverage   = np.array([r["coverage"]      for r in metrics], dtype=float)
-    ncc        = np.array([r["ncc"]           for r in metrics], dtype=float)
-    nmi        = np.array([r["nmi"]           for r in metrics], dtype=float)
-    snr        = np.array([r.get("snr", 0.0) for r in metrics], dtype=float)
-
-    # short display labels (strip common BIDS prefixes)
     def _short(lbl):
         for prefix in ("acq-OrigRes_", "acq-", "desc-"):
             lbl = lbl.replace(prefix, "")
         return lbl
-    labels = [_short(l) for l in labels_raw]
 
-    # index before-metrics by label for quick lookup
-    before_by_label = {}
-    if metrics_before:
-        before_by_label = {r["label"]: r for r in metrics_before}
+    labels_raw = [r["label"] for r in metrics]
+    labels     = [_short(l)  for l in labels_raw]
+    n          = len(labels)
 
-    cmap_snr = plt.get_cmap("plasma")
-    vmin_c, vmax_c = snr.min(), max(snr.max(), 1e-6)
-    dot_colors = [cmap_snr((v - vmin_c) / (vmax_c - vmin_c)) for v in snr]
+    before_by = {r["label"]: r for r in metrics_before} if metrics_before else {}
+    b_by      = {r["label"]: r for r in metrics_b}       if metrics_b       else {}
 
-    BG   = "white"
-    PAN  = "#f5f5f5"
-    GREY = "#cccccc"
-    TXT  = "black"
+    def _arr(source_by, key):
+        return np.array([source_by.get(l, {}).get(key, np.nan) for l in labels_raw], dtype=float)
 
-    n      = len(labels)
-    fig_h  = max(11, n * 0.32 + 4)
+    BG          = "white"
+    PAN         = "#f5f5f5"
+    GREY        = "#cccccc"
+    TXT         = "black"
+    C_BEFORE    = "#9e9e9e"
+    C_PIPELINE  = "#1976d2"
+    C_ARTICLE   = "#e53935"
 
-    fig, axes = plt.subplots(
-        2, 2,
-        figsize=(16, fig_h),
-        facecolor=BG,
-        constrained_layout=True,
-    )
+    y     = np.arange(n)
+    fig_h = max(6, n * 0.48 + 2.5)
 
-    def _lollipop(ax, values, sort_idx, xlabel, title,
-                  before_values=None, ref_line=None):
+    # 4 panels: NCC, NMI, FBER, EFC
+    panel_keys = [
+        ("ncc",  "NCC",  "Normalised Cross-Correlation",   "NCC  (negative = anti-correlated)"),
+        ("nmi",  "NMI",  "Normalised Mutual Information",  "NMI"),
+        ("fber", "FBER", "Foreground-Background Energy Ratio\n(higher = better)", "FBER  [higher = better]"),
+        ("efc",  "EFC",  "Entropy Focus Criterion (normalized)\n(less negative = better)", "EFC  [less negative = better]"),
+    ]
+
+    fig, axes = plt.subplots(1, 4, figsize=(28, fig_h), facecolor=BG, constrained_layout=True)
+
+    def _panel(ax, key, xlabel, title):
         ax.set_facecolor(PAN)
-        y = np.arange(len(sort_idx))
-        vlabels = [labels[i] for i in sort_idx]
-        vvals   = values[sort_idx]
+        before_v   = _arr(before_by, key)
+        pipeline_v = np.array([r.get(key, np.nan) for r in metrics], dtype=float)
+        article_v  = _arr(b_by, key)
 
-        # "before" grey markers
-        if before_values is not None:
-            bvals = before_values[sort_idx]
-            ax.scatter(bvals, y, c="lightgrey", s=50, zorder=2,
-                       edgecolors="grey", linewidths=0.5,
-                       marker="D", label="Before registration")
+        # arrows: Before → Pipeline and Before → Article
+        for i in range(n):
+            for end_v, col in [(pipeline_v[i], C_PIPELINE), (article_v[i], C_ARTICLE)]:
+                if not (np.isnan(before_v[i]) or np.isnan(end_v)) and abs(end_v - before_v[i]) > 1e-8:
+                    ax.annotate(
+                        "", xy=(end_v, y[i]), xytext=(before_v[i], y[i]),
+                        arrowprops=dict(arrowstyle="-|>", color=col,
+                                        lw=0.9, alpha=0.45, mutation_scale=9),
+                    )
 
-        ax.hlines(y, 0, vvals, color=GREY, linewidth=1.2, zorder=1)
-        sc = ax.scatter(vvals, y, c=[snr[i] for i in sort_idx],
-                        cmap="plasma", vmin=vmin_c, vmax=vmax_c,
-                        s=70, zorder=3, edgecolors="dimgrey", linewidths=0.4,
-                        label="After registration")
-
-        if ref_line is not None:
-            ax.axvline(ref_line, color="black", linestyle="--",
-                       linewidth=0.7, alpha=0.4, zorder=2)
+        if metrics_before:
+            ax.scatter(before_v,   y, c=C_BEFORE,   s=70, zorder=4,
+                       edgecolors="dimgrey", linewidths=0.5, marker="D",
+                       label="Before (unregistered)")
+        ax.scatter(pipeline_v, y, c=C_PIPELINE, s=70, zorder=5,
+                   edgecolors="darkblue", linewidths=0.5, marker="o",
+                   label=label_a)
+        if metrics_b:
+            ax.scatter(article_v, y, c=C_ARTICLE, s=70, zorder=5,
+                       edgecolors="darkred", linewidths=0.5, marker="s",
+                       label=label_b)
 
         ax.set_yticks(y)
-        ax.set_yticklabels(vlabels, color=TXT, fontsize=7.5)
+        ax.set_yticklabels(labels, color=TXT, fontsize=8.5)
         ax.set_xlabel(xlabel, color=TXT, fontsize=9)
         ax.set_title(title, color=TXT, fontsize=10, pad=6)
         ax.tick_params(colors=TXT, labelsize=8)
         ax.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
         for spine in ax.spines.values():
             spine.set_edgecolor(GREY)
-        if before_values is not None:
-            ax.legend(facecolor="white", labelcolor="black", fontsize=8,
-                      loc="lower right", framealpha=0.8)
-        return sc
+        ax.legend(facecolor="white", labelcolor="black", fontsize=8.5,
+                  loc="best", framealpha=0.9)
 
-    # build before arrays aligned to labels_raw order (NaN if missing)
-    def _before_array(key):
-        if not before_by_label:
-            return None
-        return np.array(
-            [before_by_label.get(l, {}).get(key, np.nan) for l in labels_raw],
-            dtype=float)
-
-    ncc_before = _before_array("ncc")
-    nmi_before = _before_array("nmi")
-
-    order_ncc = np.argsort(-ncc)   # most negative (best) at top
-    sc1 = _lollipop(axes[0, 0], ncc, order_ncc,
-                    "NCC  (negative = anti-correlated, expected for MRSI vs T1w UNI-DEN)",
-                    "NCC  –  ranked by value  (most negative = best, at top)",
-                    before_values=ncc_before,
-                    ref_line=0.0)
-
-    order_nmi = np.argsort(nmi)
-    sc2 = _lollipop(axes[0, 1], nmi, order_nmi,
-                    "Normalised Mutual Information (NMI)",
-                    "NMI  –  ranked by quality  (best at top)",
-                    before_values=nmi_before)
-
-    # shared colorbar
-    sm = plt.cm.ScalarMappable(cmap="plasma",
-                               norm=plt.Normalize(vmin=vmin_c, vmax=vmax_c))
-    sm.set_array([])
-    cb = fig.colorbar(sm, ax=axes[:, 1], location="right",
-                      shrink=0.6, pad=0.02)
-    cb.set_label("In-region SNR (mean/std)", color=TXT, fontsize=9)
-    cb.ax.yaxis.set_tick_params(color=TXT, labelcolor=TXT)
-
-    def _scatter(ax, xvals, yvals, xlabel, ylabel, title,
-                 xbefore=None, ybefore=None,
-                 xref=None, yref=None):
-        ax.set_facecolor(PAN)
-        if xbefore is not None and ybefore is not None:
-            for xb, yb, xa, ya in zip(xbefore, ybefore, xvals, yvals):
-                if not (np.isnan(xb) or np.isnan(yb)):
-                    ax.annotate("", xy=(xa, ya), xytext=(xb, yb),
-                                arrowprops=dict(arrowstyle="-|>",
-                                                color="grey", lw=0.7, alpha=0.5))
-            ax.scatter(xbefore, ybefore, c="lightgrey", s=40, zorder=2,
-                       edgecolors="grey", linewidths=0.4, marker="D",
-                       label="Before registration")
-        sc = ax.scatter(xvals, yvals, c=snr,
-                        cmap="plasma", vmin=vmin_c, vmax=vmax_c,
-                        s=65, zorder=3, edgecolors="dimgrey", linewidths=0.4,
-                        label="After registration")
-        for i, lbl in enumerate(labels):
-            ax.annotate(lbl, (xvals[i], yvals[i]),
-                        textcoords="offset points", xytext=(5, 3),
-                        fontsize=6.5, color="dimgrey", zorder=4)
-        if xref is not None:
-            ax.axvline(xref, color="black", linestyle="--",
-                       linewidth=0.7, alpha=0.4)
-        if yref is not None:
-            ax.axhline(yref, color="black", linestyle="--",
-                       linewidth=0.7, alpha=0.4)
-        ax.set_xlabel(xlabel, color=TXT, fontsize=9)
-        ax.set_ylabel(ylabel, color=TXT, fontsize=9)
-        ax.set_title(title, color=TXT, fontsize=10, pad=6)
-        ax.tick_params(colors=TXT, labelsize=8)
-        ax.grid(color=GREY, linewidth=0.4, zorder=0)
-        for spine in ax.spines.values():
-            spine.set_edgecolor(GREY)
-        if xbefore is not None:
-            ax.legend(facecolor="white", labelcolor="black", fontsize=8,
-                      framealpha=0.8)
-        return sc
-
-    _scatter(axes[1, 0], ncc, nmi,
-             "NCC", "NMI",
-             "NCC vs NMI  (colour = SNR, arrows = before -> after)",
-             xbefore=ncc_before, ybefore=nmi_before,
-             xref=0.0)
-
-    _scatter(axes[1, 1], snr, ncc,
-             "In-region SNR (mean/std)", "NCC",
-             "SNR vs NCC  (colour = SNR)",
-             yref=0.0)
+    for ax, (key, _abbr, xlabel, title) in zip(axes, panel_keys):
+        _panel(ax, key, xlabel, title)
 
     fig.suptitle(
-        f"{subj}  {ses}  –  Registration quality metrics  (Reg-17 total pipeline)",
+        f"{subj}  {ses}  –  Registration quality metrics\n"
+        f"◆ Before  ●  {label_a}  ■  {label_b if metrics_b else ''}",
         color=TXT, fontsize=12,
     )
     _auto_save(fig)
     plt.show()
 
     # print table
-    print(f"\n{'Label':<35}  {'Coverage':>9}  {'NCC':>8}  {'NMI':>8}  {'SNR':>8}")
-    print("─" * 75)
+    has_b = bool(metrics_b)
+    hdr = f"{'Label':<35}  {'NCC':>8}  {'NMI':>8}  {'FBER':>8}  {'EFC':>12}"
+    if has_b:
+        hdr += f"  {'NCC_B':>8}  {'NMI_B':>8}  {'FBER_B':>8}  {'EFC_B':>12}"
+    print(f"\n{hdr}")
+    print("─" * len(hdr))
     for r in metrics:
-        print(f"{r['label']:<35}  {r['coverage']:>9.3f}  {r['ncc']:>8.4f}  {r['nmi']:>8.4f}  {r.get('snr', 0.0):>8.3f}")
+        row = (f"{r['label']:<35}  {r.get('ncc',0):>8.4f}  {r.get('nmi',0):>8.4f}"
+               f"  {r.get('fber',0):>8.3f}  {r.get('efc',0):>12.6f}")
+        if has_b:
+            rb = b_by.get(r["label"], {})
+            row += (f"  {rb.get('ncc',float('nan')):>8.4f}  {rb.get('nmi',float('nan')):>8.4f}"
+                    f"  {rb.get('fber',float('nan')):>8.3f}  {rb.get('efc',float('nan')):>12.6f}")
+        print(row)
 
 def plot_pipeline_metrics_comparison(
     metrics_a: list,
@@ -3002,3 +2940,181 @@ def plot_tissue_slope_comparison(
     )
     _auto_save(fig)
     plt.show()
+
+
+# ── Image Quality Metrics: FBER & EFC ─────────────────────────────────────────
+
+def plot_image_quality_metrics(
+    metrics: list,
+    subj: str = "sub-01",
+    ses: str = "ses-01",
+    metrics_before: list | None = None,
+    metrics_b: list | None = None,
+    label_a: str = "Our pipeline (Reg-17)",
+    label_b: str = "Toolbox SyN",
+    metabolites: list | None = None,
+):
+    """Plot FBER and EFC per metabolite as lollipop charts.
+
+    Parameters
+    ----------
+    metrics        : primary list of dicts with keys label, fber, efc
+                     (e.g. iqm_metrics from compute_image_quality_metrics).
+    metrics_before : optional baseline (before registration).
+    metrics_b      : optional second pipeline for side-by-side comparison.
+    label_a / label_b : display labels for the two pipelines.
+    metabolites    : optional subset filter.
+    """
+    if not metrics:
+        print("[iqm] no metrics to plot.")
+        return
+
+    # optional subset
+    def _filter(lst):
+        if lst is None:
+            return None
+        if metabolites is None:
+            return lst
+        keep = set(metabolites)
+        return [r for r in lst if r["label"] in keep]
+
+    metrics        = _filter(metrics) or []
+    metrics_before = _filter(metrics_before)
+    metrics_b      = _filter(metrics_b)
+
+    if not metrics:
+        print("[iqm] no metrics remaining after metabolite filter.")
+        return
+
+    def _short(lbl):
+        for prefix in ("acq-OrigRes_", "acq-", "desc-"):
+            lbl = lbl.replace(prefix, "")
+        return lbl
+
+    labels     = [_short(r["label"]) for r in metrics]
+    fber_a     = np.array([r["fber"]  for r in metrics], dtype=float)
+    efc_a      = np.array([r["efc"]   for r in metrics], dtype=float)
+
+    before_by_label  = {r["label"]: r for r in metrics_before} if metrics_before else {}
+    b_by_label       = {r["label"]: r for r in metrics_b}       if metrics_b       else {}
+    labels_raw       = [r["label"] for r in metrics]
+
+    fber_before = np.array([before_by_label.get(l, {}).get("fber", np.nan) for l in labels_raw], dtype=float)
+    efc_before  = np.array([before_by_label.get(l, {}).get("efc",  np.nan) for l in labels_raw], dtype=float)
+    fber_b      = np.array([b_by_label.get(l, {}).get("fber", np.nan)      for l in labels_raw], dtype=float)
+    efc_b       = np.array([b_by_label.get(l, {}).get("efc",  np.nan)      for l in labels_raw], dtype=float)
+
+    has_before = metrics_before is not None and not np.all(np.isnan(fber_before))
+    has_b      = metrics_b      is not None and not np.all(np.isnan(fber_b))
+
+    BG   = "white"
+    PAN  = "#f5f5f5"
+    GREY = "#cccccc"
+    TXT  = "black"
+    CLR_A   = "#d62728"   # red  – primary pipeline
+    CLR_B   = "#1f77b4"   # blue – secondary pipeline
+    CLR_BEF = "#aaaaaa"   # grey – before
+
+    n      = len(labels)
+    fig_h  = max(8, n * 0.35 + 3)
+    n_cols = 2 + (1 if has_b else 0)   # fber | efc | (pipeline-delta if has_b)
+    fig, axes = plt.subplots(1, n_cols, figsize=(7 * n_cols, fig_h),
+                              facecolor=BG, constrained_layout=True)
+
+    def _lollipop(ax, values_a, values_b, sort_idx,
+                  xlabel, title, color_a, color_b,
+                  before_vals=None, higher_better=True):
+        ax.set_facecolor(PAN)
+        y       = np.arange(len(sort_idx))
+        ylabs   = [labels[i] for i in sort_idx]
+        va      = values_a[sort_idx]
+        vb      = values_b[sort_idx] if values_b is not None else None
+        vbef    = before_vals[sort_idx] if before_vals is not None else None
+
+        # before markers
+        if vbef is not None:
+            ax.scatter(vbef, y, c=CLR_BEF, s=45, zorder=2,
+                       edgecolors="grey", linewidths=0.4,
+                       marker="D", label="Before registration")
+
+        # secondary pipeline markers
+        if vb is not None:
+            ax.scatter(vb, y, c=color_b, s=50, zorder=3,
+                       edgecolors="dimgrey", linewidths=0.4,
+                       marker="s", alpha=0.75, label=label_b)
+
+        # primary pipeline stems + dots
+        ax.hlines(y, 0, va, color=GREY, linewidth=1.2, zorder=1)
+        ax.scatter(va, y, c=color_a, s=65, zorder=4,
+                   edgecolors="dimgrey", linewidths=0.4, label=label_a)
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(ylabs, color=TXT, fontsize=7.5)
+        ax.set_xlabel(xlabel, color=TXT, fontsize=9)
+        ax.set_title(title, color=TXT, fontsize=10, pad=6)
+        ax.tick_params(colors=TXT, labelsize=8)
+        ax.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(GREY)
+        ax.legend(facecolor="white", labelcolor="black", fontsize=8,
+                  loc="lower right", framealpha=0.85)
+        direction = "↑ better" if higher_better else "↓ better (less negative)"
+        ax.set_title(f"{title}  [{direction}]", color=TXT, fontsize=10, pad=6)
+
+    order_fber = np.argsort(fber_a)[::-1]   # highest FBER at top
+    order_efc  = np.argsort(efc_a)          # least negative EFC at top (= best)
+
+    _lollipop(axes[0],
+              fber_a,
+              fber_b if has_b else None,
+              order_fber,
+              "FBER  (Foreground-Background Energy Ratio)",
+              "FBER  –  ranked by value",
+              CLR_A, CLR_B,
+              before_vals=fber_before if has_before else None,
+              higher_better=True)
+
+    _lollipop(axes[1],
+              efc_a,
+              efc_b if has_b else None,
+              order_efc,
+              "EFC  (Entropy Focus Criterion, normalized)",
+              "EFC  –  ranked by quality",
+              CLR_A, CLR_B,
+              before_vals=efc_before if has_before else None,
+              higher_better=False)
+
+    # Pipeline-delta panel
+    if has_b and n_cols == 3:
+        ax = axes[2]
+        ax.set_facecolor(PAN)
+        y      = np.arange(n)
+        delta  = fber_a - fber_b
+        colors = [CLR_A if d >= 0 else CLR_B for d in delta]
+        order_d = np.argsort(delta)
+        ax.barh(y, delta[order_d], color=[colors[i] for i in order_d],
+                edgecolor="none", zorder=2)
+        ax.axvline(0, color="black", linewidth=0.8, zorder=3)
+        ax.set_yticks(y)
+        ax.set_yticklabels([labels[i] for i in order_d], color=TXT, fontsize=7.5)
+        ax.set_xlabel(f"ΔFBER  ({label_a} − {label_b})", color=TXT, fontsize=9)
+        ax.set_title(f"FBER pipeline delta\n(positive = {label_a} better)",
+                     color=TXT, fontsize=10, pad=6)
+        ax.tick_params(colors=TXT, labelsize=8)
+        ax.grid(axis="x", color=GREY, linewidth=0.4, zorder=0)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(GREY)
+
+    fig.suptitle(
+        f"{subj}  {ses}  –  Image Quality Metrics: FBER & EFC\n"
+        "FBER: higher = better signal focus  |  EFC: less negative = better focus",
+        color=TXT, fontsize=12,
+    )
+    _auto_save(fig)
+    plt.show()
+
+    # print table
+    print(f"\n{'Label':<35}  {'FBER':>10}  {'EFC':>12}")
+    print("─" * 62)
+    for r in metrics:
+        print(f"{r['label']:<35}  {r['fber']:>10.3f}  {r['efc']:>12.6f}")

@@ -565,7 +565,7 @@ def compute_registration_metrics(
         mrsi_data   = _f32(img)
         signal_mask = mrsi_data > 0
         overlap     = brain_mask & signal_mask
-        coverage    = float(overlap.sum()) / n_brain if n_brain > 0 else 0.0
+        background_mask = ~brain_mask
 
         if overlap.sum() > 20:
             t1w_vals  = t1w_data[overlap]
@@ -576,15 +576,16 @@ def compute_registration_metrics(
             denom = np.sqrt((t1w_c ** 2).sum() * (mrs_c ** 2).sum())
             ncc   = float((t1w_c * mrs_c).sum() / (denom + 1e-10))
             # NMI
-            nmi = _mutual_information(t1w_vals, mrsi_vals)
-            # in-region SNR: mean / std within overlap (higher = more uniform signal = better reg)
-            snr = float(mrsi_vals.mean()) / (float(mrsi_vals.std()) + 1e-9)
+            nmi  = _mutual_information(t1w_vals, mrsi_vals)
+            fber = _calculate_fber(mrsi_data, brain_mask, background_mask)
+            efc  = _calculate_efc(mrsi_data)
         else:
-            ncc = 0.0
-            nmi = 0.0
-            snr = 0.0
+            ncc  = 0.0
+            nmi  = 0.0
+            fber = 0.0
+            efc  = 0.0
 
-        records.append({"label": label, "coverage": coverage, "ncc": ncc, "nmi": nmi, "snr": snr})
+        records.append({"label": label, "ncc": ncc, "nmi": nmi, "fber": fber, "efc": efc})
     records.sort(key=lambda r: abs(r["ncc"]), reverse=True)
     return records
 
@@ -669,13 +670,80 @@ def run_total_pipeline(
         metrics = compute_registration_metrics(t1w_ds_brain_img, final_reg_imgs)
         print("\nRegistration quality metrics (Reg-17 total pipeline):")
         for r in metrics:
-            print(f"  {r['label']:<28}  coverage={r['coverage']:.3f}"
-                  f"  NCC={r['ncc']:+.4f}  NMI={r['nmi']:.4f}")
+            print(f"  {r['label']:<28}  NCC={r['ncc']:+.4f}  NMI={r['nmi']:.4f}"
+                  f"  FBER={r['fber']:.3f}  EFC={r['efc']:.6f}")
     else:
         metrics = []
 
     return t1w_brain_in_sum_ras_img, brain_sum_ras_transforms, final_reg_imgs, metrics
 
+
+
+
+# ── Image Quality Metrics: FBER & EFC ─────────────────────────────────────────
+
+def _calculate_fber(img_data: np.ndarray, head_mask: np.ndarray,
+                    background_mask: np.ndarray) -> float:
+    """Foreground-Background Energy Ratio (higher = better).
+
+    Returns -1.0 when no background signal is present (e.g. skull-stripped).
+    """
+    if not head_mask.any() or not background_mask.any():
+        return -1.0
+    energy_head = np.mean(img_data[head_mask].astype(np.float64) ** 2)
+    energy_bg   = np.mean(img_data[background_mask].astype(np.float64) ** 2)
+    if energy_bg < 1e-10:
+        return -1.0
+    return float(energy_head / energy_bg)
+
+
+def _calculate_efc(img_data: np.ndarray, frame_mask: np.ndarray | None = None) -> float:
+    """Entropy Focus Criterion – normalized, lower (less negative) = better.
+
+    Returns a negative number; values closer to 0 indicate better focus.
+    """
+    masked = img_data[frame_mask].astype(np.float32) if frame_mask is not None \
+             else img_data.flatten().astype(np.float32)
+    abs_img = np.abs(masked)
+    x_max   = np.sqrt(np.sum(abs_img ** 2))
+    if x_max < 1e-10:
+        return 0.0
+    p       = abs_img / x_max
+    entropy = -np.sum(p * np.log(p + 1e-10))
+    N = len(masked)
+    if N < 2:
+        return 0.0
+    normalized_efc = (N / (N * np.log(N) - 1)) * entropy
+    return float(-normalized_efc)
+
+
+def compute_image_quality_metrics(
+    t1w_img: nib.Nifti1Image,
+    reg_mrsi_imgs: dict) -> list:
+    """Compute FBER and EFC for each registered metabolite map.
+
+    Parameters
+    ----------
+    t1w_img      : T1w reference image; non-zero voxels define the head mask.
+    reg_mrsi_imgs: {label: nib.Nifti1Image} mapping of registered MRSI maps.
+
+    Returns
+    -------
+    List of dicts with keys: label, fber, efc.
+    """
+    t1w_data        = _f32(t1w_img)
+    head_mask       = t1w_data > 0
+    background_mask = ~head_mask
+
+    records = []
+    for label, img in reg_mrsi_imgs.items():
+        mrsi_data = _f32(img)
+        fber = _calculate_fber(mrsi_data, head_mask, background_mask)
+        efc  = _calculate_efc(mrsi_data)
+        records.append({"label": label, "fber": fber, "efc": efc})
+
+    records.sort(key=lambda r: r["fber"], reverse=True)
+    return records
 
 
 def compute_tissue_fractions_in_mrsi(
